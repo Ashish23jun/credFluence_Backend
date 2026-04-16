@@ -24,8 +24,11 @@ class Settings(BaseSettings):
     redis_url: str = "redis://localhost:6379/0"
 
     # JWT
+    # Local dev: set file paths. Production (Dokploy): set key content directly as env vars.
     jwt_private_key_path: str = "./private.pem"
     jwt_public_key_path: str = "./public.pem"
+    jwt_private_key_content: str = ""   # JWT_PRIVATE_KEY_CONTENT in Dokploy env vars
+    jwt_public_key_content: str = ""    # JWT_PUBLIC_KEY_CONTENT in Dokploy env vars
     jwt_algorithm: str = "RS256"
     jwt_access_token_expire_minutes: int = 30
     jwt_refresh_token_expire_days: int = 7
@@ -84,6 +87,10 @@ class Settings(BaseSettings):
 
     @property
     def jwt_private_key(self) -> str:
+        # Production: content injected directly via Dokploy env var
+        if self.jwt_private_key_content:
+            return self.jwt_private_key_content.replace("\\n", "\n")
+        # Local dev: read from .pem file
         path = Path(self.jwt_private_key_path)
         if path.exists():
             return path.read_text()
@@ -91,6 +98,10 @@ class Settings(BaseSettings):
 
     @property
     def jwt_public_key(self) -> str:
+        # Production: content injected directly via Dokploy env var
+        if self.jwt_public_key_content:
+            return self.jwt_public_key_content.replace("\\n", "\n")
+        # Local dev: read from .pem file
         path = Path(self.jwt_public_key_path)
         if path.exists():
             return path.read_text()
