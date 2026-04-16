@@ -1,4 +1,7 @@
 services:
+  # ──────────────────────────────────────────────
+  # API
+  # ──────────────────────────────────────────────
   api:
     build:
       context: .
@@ -13,14 +16,20 @@ services:
       redis:
         condition: service_healthy
       minio:
-        condition: service_started
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
     volumes:
       - ./app:/app/app
       - ./migrations:/app/migrations
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
     networks:
       - credfluence
+    restart: unless-stopped
 
+  # ──────────────────────────────────────────────
+  # PostgreSQL
+  # ──────────────────────────────────────────────
   postgres:
     image: postgres:16-alpine
     environment:
@@ -32,49 +41,87 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U credfluence"]
+      test: ["CMD-SHELL", "pg_isready -U credfluence -d credfluence"]
       interval: 5s
       timeout: 5s
-      retries: 5
+      retries: 10
     networks:
       - credfluence
+    restart: unless-stopped
 
+  # ──────────────────────────────────────────────
+  # Redis
+  # ──────────────────────────────────────────────
   redis:
     image: redis:7-alpine
     ports:
       - "6379:6379"
     volumes:
       - redis_data:/data
+    command: redis-server --appendonly yes
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
       timeout: 3s
-      retries: 5
+      retries: 10
     networks:
       - credfluence
+    restart: unless-stopped
 
+  # ──────────────────────────────────────────────
+  # MinIO (S3-compatible storage)
+  # ──────────────────────────────────────────────
   minio:
     image: minio/minio:latest
     ports:
-      - "9000:9000"
-      - "9001:9001"
+      - "9000:9000"    # S3 API
+      - "9001:9001"    # Web console → open http://localhost:9001
     environment:
       MINIO_ROOT_USER: minioadmin
       MINIO_ROOT_PASSWORD: minioadmin
     volumes:
       - minio_data:/data
     command: server /data --console-address ":9001"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - credfluence
+    restart: unless-stopped
+
+  # Creates the proof-uploads bucket on first run
+  minio-init:
+    image: minio/mc:latest
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+        mc alias set local http://minio:9000 minioadmin minioadmin &&
+        mc mb --ignore-existing local/credfluence-proofs &&
+        mc anonymous set none local/credfluence-proofs &&
+        echo 'Bucket credfluence-proofs ready'
+      "
     networks:
       - credfluence
 
+  # ──────────────────────────────────────────────
+  # MailHog (local email catcher)
+  # ──────────────────────────────────────────────
   mailhog:
     image: mailhog/mailhog:latest
     ports:
-      - "1025:1025"   # SMTP
-      - "8025:8025"   # Web UI
+      - "1025:1025"    # SMTP
+      - "8025:8025"    # Web UI → open http://localhost:8025
     networks:
       - credfluence
+    restart: unless-stopped
 
+  # ──────────────────────────────────────────────
+  # Celery Worker
+  # ──────────────────────────────────────────────
   celery_worker:
     build:
       context: .
@@ -82,12 +129,18 @@ services:
     env_file:
       - .env
     depends_on:
-      - redis
-      - postgres
-    command: celery -A app.tasks.celery_app worker --loglevel=info
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: celery -A app.tasks.celery_app worker --loglevel=info --concurrency=2
     networks:
       - credfluence
+    restart: unless-stopped
 
+  # ──────────────────────────────────────────────
+  # Celery Beat (scheduler)
+  # ──────────────────────────────────────────────
   celery_beat:
     build:
       context: .
@@ -95,11 +148,14 @@ services:
     env_file:
       - .env
     depends_on:
-      - redis
-      - postgres
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
     command: celery -A app.tasks.celery_app beat --loglevel=info
     networks:
       - credfluence
+    restart: unless-stopped
 
 volumes:
   postgres_data:
