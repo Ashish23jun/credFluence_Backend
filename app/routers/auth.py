@@ -49,6 +49,7 @@ async def register(payload: RegisterRequest, db: AsyncSession = Depends(get_db))
                 "email": user.email,
                 "role": user.role,
                 "is_verified": user.is_verified,
+                "subscription_tier": user.subscription_tier,
             },
             "access_token": access_token,
             "refresh_token": refresh_token,

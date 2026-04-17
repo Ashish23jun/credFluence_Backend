@@ -1,4 +1,5 @@
 from pydantic import BaseModel, EmailStr, field_validator
+from pydantic import model_validator  # noqa
 
 # ---------------------------------------------------------------------------
 # Request schemas
@@ -14,6 +15,7 @@ BLOCKED_EMAIL_DOMAINS = {
 class RegisterRequest(BaseModel):
     email: EmailStr
     password: str
+    confirm_password: str
     role: str  # creator | agency | brand
 
     @field_validator("password")
@@ -21,6 +23,14 @@ class RegisterRequest(BaseModel):
     def password_strength(cls, v: str) -> str:
         if len(v) < 8:
             raise ValueError("Password must be at least 8 characters")
+        return v
+
+    @field_validator("confirm_password")
+    @classmethod
+    def passwords_match(cls, v: str, info: object) -> str:
+        data = getattr(info, "data", {})
+        if "password" in data and v != data["password"]:
+            raise ValueError("Passwords do not match")
         return v
 
     @field_validator("role")
