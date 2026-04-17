@@ -1,7 +1,6 @@
 from functools import lru_cache
 from pathlib import Path
 
-from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -79,15 +78,11 @@ class Settings(BaseSettings):
     # Sentry
     sentry_dsn: str = ""
 
-    # CORS
-    allowed_origins: list[str] = ["http://localhost:5173", "http://localhost:3000"]
+    # CORS — comma-separated string in .env: http://localhost:5173,http://localhost:3000
+    allowed_origins: str = "http://localhost:5173,http://localhost:3000"
 
-    @field_validator("allowed_origins", mode="before")
-    @classmethod
-    def parse_origins(cls, v: object) -> list[str]:
-        if isinstance(v, str):
-            return [o.strip() for o in v.split(",")]
-        return v  # type: ignore[return-value]
+    def get_allowed_origins(self) -> list[str]:
+        return [o.strip() for o in self.allowed_origins.split(",") if o.strip()]
 
     # Rate limiting
     rate_limit_requests_per_minute: int = 60
