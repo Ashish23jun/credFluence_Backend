@@ -108,10 +108,10 @@ services:
       - credfluence
 
   # ──────────────────────────────────────────────
-  # MailHog (local email catcher)
+  # Mailpit (local email catcher — ARM64 native)
   # ──────────────────────────────────────────────
   mailhog:
-    image: mailhog/mailhog:latest
+    image: axllent/mailpit:latest
     ports:
       - "1025:1025"    # SMTP
       - "8025:8025"    # Web UI → open http://localhost:8025
