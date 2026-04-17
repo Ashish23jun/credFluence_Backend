@@ -13,8 +13,8 @@ import app.models  # noqa: F401 — registers all models with Base
 
 config = context.config
 
-# Override sqlalchemy URL from app settings (uses sync URL for migrations)
-config.set_main_option("sqlalchemy.url", settings.database_url_sync)
+# Override sqlalchemy URL from app settings (async driver for async migrations)
+config.set_main_option("sqlalchemy.url", settings.database_url)
 
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
