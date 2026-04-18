@@ -50,6 +50,8 @@ class Settings(BaseSettings):
     smtp_host: str = "localhost"
     smtp_port: int = 1025
     smtp_tls: bool = False
+    smtp_user: str = ""
+    smtp_password: str = ""
 
     # Twilio
     twilio_account_sid: str = "ACplaceholder"

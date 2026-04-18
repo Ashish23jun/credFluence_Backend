@@ -5,6 +5,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
+from app.core.email import send_otp_email
 from app.core.security import (
     create_access_token,
     create_refresh_token,
@@ -13,14 +14,23 @@ from app.core.security import (
     verify_password,
 )
 from app.models.user import User
-from app.schemas.auth import LoginRequest, RefreshRequest, RegisterRequest, TokenResponse
+from app.schemas.auth import LoginRequest, RefreshRequest, RegisterRequest, VerifyEmailRequest
+from app.services.otp_service import (
+    delete_otp,
+    delete_pending_signup,
+    generate_otp,
+    get_pending_signup,
+    store_otp,
+    store_pending_signup,
+    verify_otp,
+)
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
 
 @router.post("/register", response_model=dict, status_code=status.HTTP_201_CREATED)
 async def register(payload: RegisterRequest, db: AsyncSession = Depends(get_db)) -> dict:
-    # Check duplicate email
+    # Check DB for existing verified account
     result = await db.execute(select(User).where(User.email == payload.email))
     if result.scalar_one_or_none():
         raise HTTPException(
@@ -28,21 +38,68 @@ async def register(payload: RegisterRequest, db: AsyncSession = Depends(get_db))
             detail="An account with this email already exists",
         )
 
+    # Store signup data in Redis — no DB write until OTP verified
+    hashed = hash_password(payload.password)
+    await store_pending_signup(payload.email, hashed, payload.role)
+
+    otp = generate_otp()
+    await store_otp(payload.email, otp)
+    await send_otp_email(payload.email, otp)
+
+    return {
+        "success": True,
+        "message": "OTP sent. Please verify your email to complete registration.",
+        "data": {
+            "pending_verification": True,
+            "email": payload.email,
+        },
+    }
+
+
+@router.post("/verify-email", response_model=dict)
+async def verify_email(payload: VerifyEmailRequest, db: AsyncSession = Depends(get_db)) -> dict:
+    # Verify OTP
+    if not await verify_otp(payload.email, payload.otp):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid or expired OTP. Please check your email and try again.",
+        )
+
+    # Retrieve pending signup data from Redis
+    pending = await get_pending_signup(payload.email)
+    if not pending:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Signup session expired. Please register again.",
+        )
+
+    # Guard against race condition
+    result = await db.execute(select(User).where(User.email == payload.email))
+    if result.scalar_one_or_none():
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Account already exists")
+
+    # Create user in DB now that email is verified
     user = User(
-        email=payload.email,
-        hashed_password=hash_password(payload.password),
-        role=payload.role,
+        email=pending["email"],
+        hashed_password=pending["hashed_password"],
+        role=pending["role"],
+        is_verified=True,
+        email_verified_at=datetime.now(UTC),
     )
     db.add(user)
     await db.commit()
     await db.refresh(user)
+
+    # Clean up Redis
+    await delete_otp(payload.email)
+    await delete_pending_signup(payload.email)
 
     access_token = create_access_token({"sub": str(user.id), "role": user.role})
     refresh_token = create_refresh_token({"sub": str(user.id)})
 
     return {
         "success": True,
-        "message": "Account created successfully",
+        "message": "Email verified. Account created successfully.",
         "data": {
             "user": {
                 "id": str(user.id),
@@ -54,8 +111,26 @@ async def register(payload: RegisterRequest, db: AsyncSession = Depends(get_db))
             "access_token": access_token,
             "refresh_token": refresh_token,
             "token_type": "bearer",
+            "expires_in": 1800,
         },
     }
+
+
+@router.post("/resend-otp", response_model=dict)
+async def resend_otp(email: str) -> dict:
+    # Check pending signup exists — no DB lookup needed
+    pending = await get_pending_signup(email)
+    if not pending:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Signup session expired. Please register again.",
+        )
+
+    otp = generate_otp()
+    await store_otp(email, otp)
+    await send_otp_email(email, otp)
+
+    return {"success": True, "message": "OTP resent"}
 
 
 @router.post("/login", response_model=dict)
@@ -81,6 +156,12 @@ async def login(payload: LoginRequest, db: AsyncSession = Depends(get_db)) -> di
             detail="Account is deactivated",
         )
 
+    if not user.is_verified:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Please verify your email before logging in",
+        )
+
     access_token = create_access_token({"sub": str(user.id), "role": user.role})
     refresh_token = create_refresh_token({"sub": str(user.id)})
 
@@ -98,7 +179,7 @@ async def login(payload: LoginRequest, db: AsyncSession = Depends(get_db)) -> di
             "access_token": access_token,
             "refresh_token": refresh_token,
             "token_type": "bearer",
-            "expires_in": 1800,  # 30 minutes in seconds
+            "expires_in": 1800,
         },
     }
 
