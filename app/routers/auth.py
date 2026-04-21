@@ -150,6 +150,12 @@ async def login(payload: LoginRequest, db: AsyncSession = Depends(get_db)) -> di
             detail="Invalid email or password",
         )
 
+    if user.role != payload.role:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"This account is registered as '{user.role}'. Please select the correct role.",
+        )
+
     if not user.is_active:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,

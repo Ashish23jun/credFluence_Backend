@@ -55,6 +55,14 @@ class RegisterRequest(BaseModel):
 class LoginRequest(BaseModel):
     email: EmailStr
     password: str
+    role: str  # creator | agency | brand
+
+    @field_validator("role")
+    @classmethod
+    def valid_role(cls, v: str) -> str:
+        if v not in ("creator", "agency", "brand"):
+            raise ValueError("Role must be one of: creator, agency, brand")
+        return v
 
 
 class RefreshRequest(BaseModel):

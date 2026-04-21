@@ -154,12 +154,17 @@ def _build_redirect(frontend_url: str, jwt_access: str, jwt_refresh: str, user: 
 # ---------------------------------------------------------------------------
 
 @router.get("/linkedin")
-async def linkedin_login(role: str = Query(default="creator")) -> RedirectResponse:
+async def linkedin_login(
+    role: str = Query(default="creator"),
+    mode: str = Query(default="signup"),
+) -> RedirectResponse:
     if role not in ("creator", "agency", "brand"):
         raise HTTPException(status_code=400, detail="Invalid role")
+    if mode not in ("signup", "login"):
+        raise HTTPException(status_code=400, detail="mode must be signup or login")
 
     state = secrets.token_urlsafe(32)
-    await save_state(state, role)
+    await save_state(state, role, mode)
 
     params = {
         "response_type": "code",
@@ -177,9 +182,10 @@ async def linkedin_callback(
     state: str = Query(...),
     db: AsyncSession = Depends(get_db),
 ) -> RedirectResponse:
-    role = await consume_state(state)
-    if role is None:
+    state_data = await consume_state(state)
+    if state_data is None:
         raise HTTPException(status_code=400, detail="Invalid or expired OAuth state")
+    role, mode = state_data
 
     client = await get_http_client()
     token_resp = await client.post(
@@ -214,7 +220,7 @@ async def linkedin_callback(
     if not linkedin_id:
         raise HTTPException(status_code=400, detail="LinkedIn did not return a user ID")
 
-    # Find or create user
+    # Find existing user
     result = await db.execute(select(User).where(User.linkedin_id == linkedin_id))
     user = result.scalar_one_or_none()
 
@@ -224,32 +230,40 @@ async def linkedin_callback(
         if user:
             user.linkedin_id = linkedin_id
 
-    if not user:
-        if not email:
-            raise HTTPException(status_code=400, detail="LinkedIn did not provide an email")
-        user = User(
-            email=email,
-            linkedin_id=linkedin_id,
-            role=role,
-            is_verified=True,
-            email_verified_at=datetime.now(UTC),
-        )
-        db.add(user)
-        await db.flush()
-
-        li_name: str = userinfo.get("name") or email.split("@")[0]
-        profile = Profile(
-            user_id=user.id,
-            display_name=li_name,
-            handle=None,
-            avatar_url=userinfo.get("picture"),
-            profile_type=role,
-            is_claimed=True,
-            access_level="full",
-        )
-        db.add(profile)
-    else:
+    if mode == "login":
+        if not user:
+            error_params = urlencode({"error": "account_not_found"})
+            return RedirectResponse(url=f"{settings.frontend_url}/auth/callback?{error_params}")
         if user.role != role:
+            error_params = urlencode({"error": "role_mismatch", "existing_role": user.role})
+            return RedirectResponse(url=f"{settings.frontend_url}/auth/callback?{error_params}")
+    else:
+        # signup mode
+        if not user:
+            if not email:
+                raise HTTPException(status_code=400, detail="LinkedIn did not provide an email")
+            user = User(
+                email=email,
+                linkedin_id=linkedin_id,
+                role=role,
+                is_verified=True,
+                email_verified_at=datetime.now(UTC),
+            )
+            db.add(user)
+            await db.flush()
+
+            li_name: str = userinfo.get("name") or email.split("@")[0]
+            profile = Profile(
+                user_id=user.id,
+                display_name=li_name,
+                handle=None,
+                avatar_url=userinfo.get("picture"),
+                profile_type=role,
+                is_claimed=True,
+                access_level="full",
+            )
+            db.add(profile)
+        elif user.role != role:
             error_params = urlencode({"error": "role_mismatch", "existing_role": user.role})
             return RedirectResponse(url=f"{settings.frontend_url}/auth/callback?{error_params}")
 
@@ -280,12 +294,14 @@ async def linkedin_callback(
 # ---------------------------------------------------------------------------
 
 @router.get("/oauth/instagram")
-async def instagram_login(role: str = Query(default="creator")) -> RedirectResponse:
-    if role != "creator":
-        raise HTTPException(status_code=400, detail="Instagram OAuth is only available for creators")
+async def instagram_login(
+    mode: str = Query(default="signup"),
+) -> RedirectResponse:
+    if mode not in ("signup", "login"):
+        raise HTTPException(status_code=400, detail="mode must be signup or login")
 
     state = secrets.token_urlsafe(32)
-    await save_state(state, role)
+    await save_state(state, "creator", mode)
 
     params = {
         "client_id": settings.instagram_client_id,
@@ -303,9 +319,10 @@ async def instagram_callback(
     state: str = Query(...),
     db: AsyncSession = Depends(get_db),
 ) -> RedirectResponse:
-    role = await consume_state(state)
-    if role is None:
+    state_data = await consume_state(state)
+    if state_data is None:
         raise HTTPException(status_code=400, detail="Invalid or expired OAuth state")
+    role, mode = state_data
 
     client = await get_http_client()
 
@@ -354,38 +371,41 @@ async def instagram_callback(
     instagram_id: str = ig["id"]
     username: str = ig.get("username", "")
 
-    # Find or create user
+    # Find existing user
     result = await db.execute(select(User).where(User.instagram_id == instagram_id))
     user = result.scalar_one_or_none()
 
-    if not user:
-        user = User(
-            email=f"{instagram_id}@instagram.credfluence.internal",
-            instagram_id=instagram_id,
-            role="creator",
-            is_verified=True,
-            email_verified_at=datetime.now(UTC),
-        )
-        db.add(user)
-        await db.flush()
-
-        profile = Profile(
-            user_id=user.id,
-            display_name=ig.get("name") or username,
-            handle=username,
-            bio=ig.get("biography"),
-            avatar_url=ig.get("profile_picture_url"),
-            profile_type="creator",
-            is_claimed=True,
-            access_level="full",
-        )
-        db.add(profile)
-    else:
-        if user.role != "creator":
-            error_params = urlencode({"error": "role_mismatch", "existing_role": user.role})
+    if mode == "login":
+        if not user:
+            error_params = urlencode({"error": "account_not_found"})
             return RedirectResponse(url=f"{settings.frontend_url}/auth/callback?{error_params}")
+    else:
+        # signup mode
+        if not user:
+            user = User(
+                email=f"{instagram_id}@instagram.credfluence.internal",
+                instagram_id=instagram_id,
+                role="creator",
+                is_verified=True,
+                email_verified_at=datetime.now(UTC),
+            )
+            db.add(user)
+            await db.flush()
 
-        # Update profile avatar if changed
+            profile = Profile(
+                user_id=user.id,
+                display_name=ig.get("name") or username,
+                handle=username,
+                bio=ig.get("biography"),
+                avatar_url=ig.get("profile_picture_url"),
+                profile_type="creator",
+                is_claimed=True,
+                access_level="full",
+            )
+            db.add(profile)
+
+    # Update avatar for existing user
+    if user:
         prof_result = await db.execute(select(Profile).where(Profile.user_id == user.id))
         prof = prof_result.scalar_one_or_none()
         if prof and ig.get("profile_picture_url"):
@@ -422,12 +442,17 @@ async def instagram_callback(
 # ---------------------------------------------------------------------------
 
 @router.get("/oauth/google")
-async def google_login(role: str = Query(default="creator")) -> RedirectResponse:
+async def google_login(
+    role: str = Query(default="creator"),
+    mode: str = Query(default="signup"),
+) -> RedirectResponse:
     if role not in ("creator", "agency", "brand"):
         raise HTTPException(status_code=400, detail="Invalid role")
+    if mode not in ("signup", "login"):
+        raise HTTPException(status_code=400, detail="mode must be signup or login")
 
     state = secrets.token_urlsafe(32)
-    await save_state(state, role)
+    await save_state(state, role, mode)
 
     params = {
         "client_id": settings.google_client_id,
@@ -447,9 +472,10 @@ async def google_callback(
     state: str = Query(...),
     db: AsyncSession = Depends(get_db),
 ) -> RedirectResponse:
-    role = await consume_state(state)
-    if role is None:
+    state_data = await consume_state(state)
+    if state_data is None:
         raise HTTPException(status_code=400, detail="Invalid or expired OAuth state")
+    role, mode = state_data
 
     client = await get_http_client()
 
@@ -531,7 +557,7 @@ async def google_callback(
     elif role == "creator" and youtube_channel and youtube_channel["meets_threshold"]:
         access_level = "full"
 
-    # Find or create user
+    # Find existing user
     result = await db.execute(select(User).where(User.google_id == google_id))
     user = result.scalar_one_or_none()
 
@@ -541,33 +567,13 @@ async def google_callback(
         if user:
             user.google_id = google_id
 
-    if not user:
-        user = User(
-            email=email,
-            google_id=google_id,
-            role=role,
-            is_verified=True,
-            email_verified_at=datetime.now(UTC),
-        )
-        db.add(user)
-        await db.flush()
-
-        handle = youtube_channel["channel_name"].lower().replace(" ", "_") if youtube_channel else email.split("@")[0]
-        profile = Profile(
-            user_id=user.id,
-            display_name=name or email.split("@")[0],
-            handle=handle,
-            avatar_url=picture,
-            profile_type=role,
-            access_level=access_level,
-            is_claimed=True,
-        )
-        db.add(profile)
-    else:
+    if mode == "login":
+        if not user:
+            error_params = urlencode({"error": "account_not_found"})
+            return RedirectResponse(url=f"{settings.frontend_url}/auth/callback?{error_params}")
         if user.role != role:
             error_params = urlencode({"error": "role_mismatch", "existing_role": user.role})
             return RedirectResponse(url=f"{settings.frontend_url}/auth/callback?{error_params}")
-
         # Update access_level + avatar on existing profile
         prof_result = await db.execute(select(Profile).where(Profile.user_id == user.id))
         prof = prof_result.scalar_one_or_none()
@@ -575,6 +581,41 @@ async def google_callback(
             prof.access_level = access_level
             if picture:
                 prof.avatar_url = picture
+    else:
+        # signup mode
+        if not user:
+            user = User(
+                email=email,
+                google_id=google_id,
+                role=role,
+                is_verified=True,
+                email_verified_at=datetime.now(UTC),
+            )
+            db.add(user)
+            await db.flush()
+
+            handle = youtube_channel["channel_name"].lower().replace(" ", "_") if youtube_channel else email.split("@")[0]
+            profile = Profile(
+                user_id=user.id,
+                display_name=name or email.split("@")[0],
+                handle=handle,
+                avatar_url=picture,
+                profile_type=role,
+                access_level=access_level,
+                is_claimed=True,
+            )
+            db.add(profile)
+        elif user.role != role:
+            error_params = urlencode({"error": "role_mismatch", "existing_role": user.role})
+            return RedirectResponse(url=f"{settings.frontend_url}/auth/callback?{error_params}")
+        else:
+            # Update access_level + avatar on existing profile
+            prof_result = await db.execute(select(Profile).where(Profile.user_id == user.id))
+            prof = prof_result.scalar_one_or_none()
+            if prof:
+                prof.access_level = access_level
+                if picture:
+                    prof.avatar_url = picture
 
     # Upsert YouTube social account if channel found
     if youtube_channel:
