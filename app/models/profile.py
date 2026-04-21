@@ -37,14 +37,6 @@ class Profile(Base):
     trust_score: Mapped[int] = mapped_column(Integer, default=500, nullable=False)
     review_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
 
-    # Social platforms
-    youtube_channel_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
-    instagram_handle: Mapped[str | None] = mapped_column(String(255), nullable=True)
-    linkedin_url: Mapped[str | None] = mapped_column(Text, nullable=True)
-
-    # Social stats cache (refreshed daily)
-    social_stats: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
-
     # AI-generated summary tags
     ai_summary_tags: Mapped[list | None] = mapped_column(JSONB, nullable=True)
 

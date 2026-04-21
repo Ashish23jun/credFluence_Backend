@@ -39,7 +39,7 @@ async def register(payload: RegisterRequest, db: AsyncSession = Depends(get_db))
         )
 
     # Store signup data in Redis — no DB write until OTP verified
-    hashed = hash_password(payload.password)
+    hashed = await hash_password(payload.password)
     await store_pending_signup(payload.email, hashed, payload.role)
 
     otp = generate_otp()
@@ -144,7 +144,7 @@ async def login(payload: LoginRequest, db: AsyncSession = Depends(get_db)) -> di
             detail="Invalid email or password",
         )
 
-    if not verify_password(payload.password, user.hashed_password):
+    if not await verify_password(payload.password, user.hashed_password):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid email or password",

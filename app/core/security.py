@@ -1,3 +1,4 @@
+import asyncio
 import base64
 import os
 from datetime import UTC, datetime, timedelta
@@ -11,14 +12,23 @@ from app.core.config import settings
 
 # ---------------------------------------------------------------------------
 # Password hashing (bcrypt directly — passlib has compatibility issues with bcrypt 4.x)
+# Bcrypt is CPU-bound (~300ms). Run in thread pool to avoid blocking event loop.
 # ---------------------------------------------------------------------------
 
-def hash_password(password: str) -> str:
+def _hash_password_sync(password: str) -> str:
     return bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
 
 
-def verify_password(plain_password: str, hashed_password: str) -> bool:
+def _verify_password_sync(plain_password: str, hashed_password: str) -> bool:
     return bcrypt.checkpw(plain_password.encode(), hashed_password.encode())
+
+
+async def hash_password(password: str) -> str:
+    return await asyncio.to_thread(_hash_password_sync, password)
+
+
+async def verify_password(plain_password: str, hashed_password: str) -> bool:
+    return await asyncio.to_thread(_verify_password_sync, plain_password, hashed_password)
 
 
 # ---------------------------------------------------------------------------

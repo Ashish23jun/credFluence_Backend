@@ -55,6 +55,9 @@ class User(Base):
 
     # Relationships
     profile: Mapped["Profile"] = relationship("Profile", back_populates="user", uselist=False)
+    social_accounts: Mapped[list["SocialAccount"]] = relationship(
+        "SocialAccount", back_populates="user", cascade="all, delete-orphan"
+    )
     submitted_reviews: Mapped[list["Review"]] = relationship(
         "Review", foreign_keys="Review.reviewer_id", back_populates="reviewer"
     )

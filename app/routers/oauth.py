@@ -11,6 +11,11 @@ Google rules:
   - Creator: any Google account allowed
     → has YouTube channel  → access_level = full
     → no YouTube channel   → access_level = limited (can't submit/receive reviews yet)
+
+Social accounts:
+  - All connected platforms stored in social_accounts table (one row per account)
+  - Multiple accounts per platform supported
+  - First connected account is automatically set as primary
 """
 
 import json
@@ -18,7 +23,6 @@ import secrets
 from datetime import UTC, datetime
 from urllib.parse import urlencode
 
-import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import RedirectResponse
 from sqlalchemy import select
@@ -26,8 +30,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.core.database import get_db
+from app.core.http_client import get_http_client
+from app.core.oauth_state import consume_state, save_state
 from app.core.security import create_access_token, create_refresh_token
 from app.models.profile import Profile
+from app.models.social_account import SocialAccount
 from app.models.user import User
 
 router = APIRouter(prefix="/auth", tags=["oauth"])
@@ -46,7 +53,6 @@ GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
 GOOGLE_USERINFO_URL = "https://www.googleapis.com/oauth2/v3/userinfo"
 YOUTUBE_CHANNELS_URL = "https://www.googleapis.com/youtube/v3/channels"
 
-# Scopes: identity + YouTube read-only
 GOOGLE_SCOPES = " ".join([
     "openid",
     "email",
@@ -54,18 +60,106 @@ GOOGLE_SCOPES = " ".join([
     "https://www.googleapis.com/auth/youtube.readonly",
 ])
 
-# In-memory state store (fine for single-instance dev; use Redis in prod)
-_pending_states: dict[str, str] = {}
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
 
+def _is_primary_for_platform(social_accounts: list[SocialAccount], platform: str) -> bool:
+    """Return True if user has no existing primary account for this platform."""
+    return not any(sa.platform == platform and sa.is_primary for sa in social_accounts)
+
+
+async def _get_or_create_social_account(
+    db: AsyncSession,
+    user: User,
+    platform: str,
+    platform_account_id: str,
+    username: str | None,
+    display_name: str | None,
+    avatar_url: str | None,
+    access_token: str | None,
+    refresh_token: str | None,
+    stats: dict,
+) -> SocialAccount:
+    """Upsert a SocialAccount row. Returns the account."""
+    result = await db.execute(
+        select(SocialAccount).where(
+            SocialAccount.user_id == user.id,
+            SocialAccount.platform == platform,
+            SocialAccount.platform_account_id == platform_account_id,
+        )
+    )
+    sa = result.scalar_one_or_none()
+
+    # Determine if this should be primary (first account for this platform)
+    existing = await db.execute(
+        select(SocialAccount).where(
+            SocialAccount.user_id == user.id,
+            SocialAccount.platform == platform,
+        )
+    )
+    existing_accounts = existing.scalars().all()
+    should_be_primary = not any(a.is_primary for a in existing_accounts)
+
+    if sa:
+        sa.username = username
+        sa.display_name = display_name
+        if avatar_url:
+            sa.avatar_url = avatar_url
+        sa.access_token = access_token
+        if refresh_token:
+            sa.refresh_token = refresh_token
+        sa.stats = stats
+        sa.last_synced_at = datetime.now(UTC)
+    else:
+        sa = SocialAccount(
+            user_id=user.id,
+            platform=platform,
+            platform_account_id=platform_account_id,
+            username=username,
+            display_name=display_name,
+            avatar_url=avatar_url,
+            is_primary=should_be_primary,
+            access_token=access_token,
+            refresh_token=refresh_token,
+            stats=stats,
+            connected_at=datetime.now(UTC),
+            last_synced_at=datetime.now(UTC),
+        )
+        db.add(sa)
+
+    return sa
+
+
+def _build_redirect(frontend_url: str, jwt_access: str, jwt_refresh: str, user: User, extra: dict | None = None) -> RedirectResponse:
+    user_payload: dict = {
+        "id": str(user.id),
+        "email": user.email,
+        "role": user.role,
+        "is_verified": user.is_verified,
+        "subscription_tier": user.subscription_tier,
+    }
+    if extra:
+        user_payload.update(extra)
+    params = urlencode({
+        "access_token": jwt_access,
+        "refresh_token": jwt_refresh,
+        "user": json.dumps(user_payload),
+    })
+    return RedirectResponse(url=f"{frontend_url}/auth/callback?{params}")
+
+
+# ---------------------------------------------------------------------------
+# LinkedIn
+# ---------------------------------------------------------------------------
 
 @router.get("/linkedin")
 async def linkedin_login(role: str = Query(default="creator")) -> RedirectResponse:
-    """Redirect user to LinkedIn authorization page."""
     if role not in ("creator", "agency", "brand"):
         raise HTTPException(status_code=400, detail="Invalid role")
 
     state = secrets.token_urlsafe(32)
-    _pending_states[state] = role  # remember role so callback can use it
+    await save_state(state, role)
 
     params = {
         "response_type": "code",
@@ -82,71 +176,57 @@ async def linkedin_callback(
     code: str = Query(...),
     state: str = Query(...),
     db: AsyncSession = Depends(get_db),
-) -> dict:
-    """Handle LinkedIn callback — exchange code for tokens and return JWT."""
-
-    # Validate state
-    role = _pending_states.pop(state, None)
+) -> RedirectResponse:
+    role = await consume_state(state)
     if role is None:
         raise HTTPException(status_code=400, detail="Invalid or expired OAuth state")
 
-    # Exchange code for access token
-    async with httpx.AsyncClient() as client:
-        token_resp = await client.post(
-            LINKEDIN_TOKEN_URL,
-            data={
-                "grant_type": "authorization_code",
-                "code": code,
-                "redirect_uri": settings.linkedin_redirect_uri,
-                "client_id": settings.linkedin_client_id,
-                "client_secret": settings.linkedin_client_secret,
-            },
-            headers={"Content-Type": "application/x-www-form-urlencoded"},
-        )
+    client = await get_http_client()
+    token_resp = await client.post(
+        LINKEDIN_TOKEN_URL,
+        data={
+            "grant_type": "authorization_code",
+            "code": code,
+            "redirect_uri": settings.linkedin_redirect_uri,
+            "client_id": settings.linkedin_client_id,
+            "client_secret": settings.linkedin_client_secret,
+        },
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+    )
 
     if token_resp.status_code != 200:
         raise HTTPException(status_code=400, detail="Failed to exchange LinkedIn code for token")
 
     access_token = token_resp.json().get("access_token")
 
-    # Fetch user info via OpenID Connect userinfo endpoint
-    async with httpx.AsyncClient() as client:
-        userinfo_resp = await client.get(
-            LINKEDIN_USERINFO_URL,
-            headers={"Authorization": f"Bearer {access_token}"},
-        )
+    userinfo_resp = await client.get(
+        LINKEDIN_USERINFO_URL,
+        headers={"Authorization": f"Bearer {access_token}"},
+    )
 
     if userinfo_resp.status_code != 200:
         raise HTTPException(status_code=400, detail="Failed to fetch LinkedIn user info")
 
     userinfo = userinfo_resp.json()
-    linkedin_id: str = userinfo.get("sub")  # OpenID Connect subject = LinkedIn member ID
+    linkedin_id: str = userinfo.get("sub")
     email: str | None = userinfo.get("email")
 
     if not linkedin_id:
         raise HTTPException(status_code=400, detail="LinkedIn did not return a user ID")
 
-    # --- Find or create user ---
-    role_mismatch = False
-
-    # 1. Try by linkedin_id
+    # Find or create user
     result = await db.execute(select(User).where(User.linkedin_id == linkedin_id))
     user = result.scalar_one_or_none()
 
     if not user and email:
-        # 2. Try by email (account exists but not yet linked)
         result = await db.execute(select(User).where(User.email == email))
         user = result.scalar_one_or_none()
         if user:
-            user.linkedin_id = linkedin_id  # link the account
+            user.linkedin_id = linkedin_id
 
     if not user:
-        # 3. Create new user
         if not email:
-            raise HTTPException(
-                status_code=400,
-                detail="LinkedIn did not provide an email. Enable the 'email' scope.",
-            )
+            raise HTTPException(status_code=400, detail="LinkedIn did not provide an email")
         user = User(
             email=email,
             linkedin_id=linkedin_id,
@@ -161,7 +241,7 @@ async def linkedin_callback(
         profile = Profile(
             user_id=user.id,
             display_name=li_name,
-            handle=None,  # LinkedIn users have no handle — set when they fill profile
+            handle=None,
             avatar_url=userinfo.get("picture"),
             profile_type=role,
             is_claimed=True,
@@ -169,35 +249,30 @@ async def linkedin_callback(
         )
         db.add(profile)
     else:
-        # Existing user — block login if selected role doesn't match stored role
         if user.role != role:
-            error_params = urlencode({
-                "error": "role_mismatch",
-                "existing_role": user.role,
-                "selected_role": role,
-            })
+            error_params = urlencode({"error": "role_mismatch", "existing_role": user.role})
             return RedirectResponse(url=f"{settings.frontend_url}/auth/callback?{error_params}")
+
+    # Upsert LinkedIn social account
+    await _get_or_create_social_account(
+        db=db,
+        user=user,
+        platform="linkedin",
+        platform_account_id=linkedin_id,
+        username=None,
+        display_name=userinfo.get("name"),
+        avatar_url=userinfo.get("picture"),
+        access_token=access_token,
+        refresh_token=None,
+        stats={"email": email, "name": userinfo.get("name")},
+    )
 
     await db.commit()
     await db.refresh(user)
 
-    # Issue JWT tokens
     jwt_access = create_access_token({"sub": str(user.id), "role": user.role})
     jwt_refresh = create_refresh_token({"sub": str(user.id)})
-
-    user_json = json.dumps({
-        "id": str(user.id),
-        "email": user.email,
-        "role": user.role,
-        "is_verified": user.is_verified,
-        "subscription_tier": user.subscription_tier,
-    })
-    params = urlencode({
-        "access_token": jwt_access,
-        "refresh_token": jwt_refresh,
-        "user": user_json,
-    })
-    return RedirectResponse(url=f"{settings.frontend_url}/auth/callback?{params}")
+    return _build_redirect(settings.frontend_url, jwt_access, jwt_refresh, user)
 
 
 # ---------------------------------------------------------------------------
@@ -206,12 +281,11 @@ async def linkedin_callback(
 
 @router.get("/oauth/instagram")
 async def instagram_login(role: str = Query(default="creator")) -> RedirectResponse:
-    """Redirect creator to Instagram authorization page."""
     if role != "creator":
         raise HTTPException(status_code=400, detail="Instagram OAuth is only available for creators")
 
     state = secrets.token_urlsafe(32)
-    _pending_states[state] = role
+    await save_state(state, role)
 
     params = {
         "client_id": settings.instagram_client_id,
@@ -229,53 +303,49 @@ async def instagram_callback(
     state: str = Query(...),
     db: AsyncSession = Depends(get_db),
 ) -> RedirectResponse:
-    """Handle Instagram callback — exchange code, fetch profile, return JWT."""
-
-    role = _pending_states.pop(state, None)
+    role = await consume_state(state)
     if role is None:
         raise HTTPException(status_code=400, detail="Invalid or expired OAuth state")
 
-    # Step 1: exchange code for short-lived token (1 hr)
-    async with httpx.AsyncClient() as client:
-        token_resp = await client.post(
-            INSTAGRAM_TOKEN_URL,
-            data={
-                "client_id": settings.instagram_client_id,
-                "client_secret": settings.instagram_client_secret,
-                "grant_type": "authorization_code",
-                "redirect_uri": settings.instagram_redirect_uri,
-                "code": code,
-            },
-        )
+    client = await get_http_client()
+
+    # Exchange code for short-lived token
+    token_resp = await client.post(
+        INSTAGRAM_TOKEN_URL,
+        data={
+            "client_id": settings.instagram_client_id,
+            "client_secret": settings.instagram_client_secret,
+            "grant_type": "authorization_code",
+            "redirect_uri": settings.instagram_redirect_uri,
+            "code": code,
+        },
+    )
 
     if token_resp.status_code != 200:
         raise HTTPException(status_code=400, detail=f"Instagram token exchange failed: {token_resp.text}")
 
-    token_data = token_resp.json()
-    short_lived_token: str = token_data["access_token"]
+    short_lived_token: str = token_resp.json()["access_token"]
 
-    # Step 2: exchange for long-lived token (60 days)
-    async with httpx.AsyncClient() as client:
-        ll_resp = await client.get(
-            INSTAGRAM_LONG_LIVED_TOKEN_URL,
-            params={
-                "grant_type": "ig_exchange_token",
-                "client_secret": settings.instagram_client_secret,
-                "access_token": short_lived_token,
-            },
-        )
+    # Exchange for long-lived token (60 days)
+    ll_resp = await client.get(
+        INSTAGRAM_LONG_LIVED_TOKEN_URL,
+        params={
+            "grant_type": "ig_exchange_token",
+            "client_secret": settings.instagram_client_secret,
+            "access_token": short_lived_token,
+        },
+    )
 
     long_lived_token = ll_resp.json().get("access_token", short_lived_token) if ll_resp.status_code == 200 else short_lived_token
 
-    # Step 3: fetch Instagram profile
-    async with httpx.AsyncClient() as client:
-        profile_resp = await client.get(
-            f"{INSTAGRAM_GRAPH_URL}/me",
-            params={
-                "fields": "id,username,name,biography,followers_count,media_count,profile_picture_url,website",
-                "access_token": long_lived_token,
-            },
-        )
+    # Fetch Instagram profile
+    profile_resp = await client.get(
+        f"{INSTAGRAM_GRAPH_URL}/me",
+        params={
+            "fields": "id,username,name,biography,followers_count,media_count,profile_picture_url,website",
+            "access_token": long_lived_token,
+        },
+    )
 
     if profile_resp.status_code != 200:
         raise HTTPException(status_code=400, detail=f"Failed to fetch Instagram profile: {profile_resp.text}")
@@ -284,21 +354,11 @@ async def instagram_callback(
     instagram_id: str = ig["id"]
     username: str = ig.get("username", "")
 
-    # Step 4: find or create user
+    # Find or create user
     result = await db.execute(select(User).where(User.instagram_id == instagram_id))
     user = result.scalar_one_or_none()
 
-    instagram_stats = {
-        "followers_count": ig.get("followers_count", 0),
-        "media_count": ig.get("media_count", 0),
-        "username": username,
-        "profile_picture_url": ig.get("profile_picture_url"),
-        "access_token": long_lived_token,
-        "token_fetched_at": datetime.now(UTC).isoformat(),
-    }
-
     if not user:
-        # New user — create account + profile
         user = User(
             email=f"{instagram_id}@instagram.credfluence.internal",
             instagram_id=instagram_id,
@@ -307,7 +367,7 @@ async def instagram_callback(
             email_verified_at=datetime.now(UTC),
         )
         db.add(user)
-        await db.flush()  # get user.id before creating profile
+        await db.flush()
 
         profile = Profile(
             user_id=user.id,
@@ -317,46 +377,44 @@ async def instagram_callback(
             avatar_url=ig.get("profile_picture_url"),
             profile_type="creator",
             is_claimed=True,
-            social_stats={"instagram": instagram_stats},
+            access_level="full",
         )
         db.add(profile)
     else:
-        # Existing user — block if role mismatch
         if user.role != "creator":
             error_params = urlencode({"error": "role_mismatch", "existing_role": user.role})
             return RedirectResponse(url=f"{settings.frontend_url}/auth/callback?{error_params}")
 
-        # Refresh instagram stats + token on profile
-        result = await db.execute(select(Profile).where(Profile.user_id == user.id))
-        profile = result.scalar_one_or_none()
-        if profile:
-            existing = profile.social_stats or {}
-            existing["instagram"] = instagram_stats
-            profile.social_stats = existing
-            profile.instagram_handle = username
-            if ig.get("profile_picture_url"):
-                profile.avatar_url = ig["profile_picture_url"]
+        # Update profile avatar if changed
+        prof_result = await db.execute(select(Profile).where(Profile.user_id == user.id))
+        prof = prof_result.scalar_one_or_none()
+        if prof and ig.get("profile_picture_url"):
+            prof.avatar_url = ig["profile_picture_url"]
+
+    # Upsert Instagram social account
+    await _get_or_create_social_account(
+        db=db,
+        user=user,
+        platform="instagram",
+        platform_account_id=instagram_id,
+        username=username,
+        display_name=ig.get("name") or username,
+        avatar_url=ig.get("profile_picture_url"),
+        access_token=long_lived_token,
+        refresh_token=None,
+        stats={
+            "followers_count": ig.get("followers_count", 0),
+            "media_count": ig.get("media_count", 0),
+            "biography": ig.get("biography"),
+        },
+    )
 
     await db.commit()
     await db.refresh(user)
 
-    # Issue JWT tokens
     jwt_access = create_access_token({"sub": str(user.id), "role": user.role})
     jwt_refresh = create_refresh_token({"sub": str(user.id)})
-
-    user_json = json.dumps({
-        "id": str(user.id),
-        "email": user.email,
-        "role": user.role,
-        "is_verified": user.is_verified,
-        "subscription_tier": user.subscription_tier,
-    })
-    redirect_params = urlencode({
-        "access_token": jwt_access,
-        "refresh_token": jwt_refresh,
-        "user": user_json,
-    })
-    return RedirectResponse(url=f"{settings.frontend_url}/auth/callback?{redirect_params}")
+    return _build_redirect(settings.frontend_url, jwt_access, jwt_refresh, user)
 
 
 # ---------------------------------------------------------------------------
@@ -365,12 +423,11 @@ async def instagram_callback(
 
 @router.get("/oauth/google")
 async def google_login(role: str = Query(default="creator")) -> RedirectResponse:
-    """Redirect user to Google consent screen."""
     if role not in ("creator", "agency", "brand"):
         raise HTTPException(status_code=400, detail="Invalid role")
 
     state = secrets.token_urlsafe(32)
-    _pending_states[state] = role
+    await save_state(state, role)
 
     params = {
         "client_id": settings.google_client_id,
@@ -378,8 +435,8 @@ async def google_login(role: str = Query(default="creator")) -> RedirectResponse
         "response_type": "code",
         "scope": GOOGLE_SCOPES,
         "state": state,
-        "access_type": "offline",   # get refresh token
-        "prompt": "consent",        # always show consent to ensure refresh token issued
+        "access_type": "offline",
+        "prompt": "consent",
     }
     return RedirectResponse(url=f"{GOOGLE_AUTH_URL}?{urlencode(params)}")
 
@@ -390,37 +447,36 @@ async def google_callback(
     state: str = Query(...),
     db: AsyncSession = Depends(get_db),
 ) -> RedirectResponse:
-    """Handle Google callback — verify identity, check YouTube, create user."""
-
-    role = _pending_states.pop(state, None)
+    role = await consume_state(state)
     if role is None:
         raise HTTPException(status_code=400, detail="Invalid or expired OAuth state")
 
-    # Step 1: exchange code for tokens
-    async with httpx.AsyncClient() as client:
-        token_resp = await client.post(
-            GOOGLE_TOKEN_URL,
-            data={
-                "code": code,
-                "client_id": settings.google_client_id,
-                "client_secret": settings.google_client_secret,
-                "redirect_uri": settings.google_redirect_uri,
-                "grant_type": "authorization_code",
-            },
-        )
+    client = await get_http_client()
+
+    # Exchange code for tokens
+    token_resp = await client.post(
+        GOOGLE_TOKEN_URL,
+        data={
+            "code": code,
+            "client_id": settings.google_client_id,
+            "client_secret": settings.google_client_secret,
+            "redirect_uri": settings.google_redirect_uri,
+            "grant_type": "authorization_code",
+        },
+    )
 
     if token_resp.status_code != 200:
         raise HTTPException(status_code=400, detail=f"Google token exchange failed: {token_resp.text}")
 
     token_data = token_resp.json()
     access_token: str = token_data["access_token"]
+    refresh_token: str | None = token_data.get("refresh_token")
 
-    # Step 2: fetch Google user info
-    async with httpx.AsyncClient() as client:
-        userinfo_resp = await client.get(
-            GOOGLE_USERINFO_URL,
-            headers={"Authorization": f"Bearer {access_token}"},
-        )
+    # Fetch Google user info
+    userinfo_resp = await client.get(
+        GOOGLE_USERINFO_URL,
+        headers={"Authorization": f"Bearer {access_token}"},
+    )
 
     if userinfo_resp.status_code != 200:
         raise HTTPException(status_code=400, detail="Failed to fetch Google user info")
@@ -430,57 +486,52 @@ async def google_callback(
     email: str = ginfo.get("email", "")
     name: str = ginfo.get("name", "")
     picture: str = ginfo.get("picture", "")
-    hosted_domain: str | None = ginfo.get("hd")  # only present for Google Workspace accounts
+    hosted_domain: str | None = ginfo.get("hd")
 
-    # Step 3: agency/brand must use Google Workspace (hosted domain)
+    # Agency/Brand must use Google Workspace
     if role in ("agency", "brand") and not hosted_domain:
-        error_params = urlencode({
-            "error": "personal_account_blocked",
-            "message": "Agencies and brands must use a Google Workspace business account, not a personal Gmail.",
-        })
+        error_params = urlencode({"error": "personal_account_blocked"})
         return RedirectResponse(url=f"{settings.frontend_url}/auth/callback?{error_params}")
 
-    # Step 4: fetch YouTube channel (for all roles)
-    youtube_stats: dict | None = None
-    async with httpx.AsyncClient() as client:
-        yt_resp = await client.get(
-            YOUTUBE_CHANNELS_URL,
-            params={
-                "part": "snippet,statistics",
-                "mine": "true",
-            },
-            headers={"Authorization": f"Bearer {access_token}"},
-        )
+    # Fetch YouTube channel
+    youtube_channel: dict | None = None
+    yt_resp = await client.get(
+        YOUTUBE_CHANNELS_URL,
+        params={"part": "snippet,statistics", "mine": "true"},
+        headers={"Authorization": f"Bearer {access_token}"},
+    )
+
+    YOUTUBE_MIN_SUBSCRIBERS = 100
+    YOUTUBE_MIN_VIDEOS = 5
 
     if yt_resp.status_code == 200:
-        yt_data = yt_resp.json()
-        items = yt_data.get("items", [])
+        items = yt_resp.json().get("items", [])
         if items:
-            channel = items[0]
-            snippet = channel.get("snippet", {})
-            stats = channel.get("statistics", {})
-            youtube_stats = {
-                "channel_id": channel.get("id"),
+            ch = items[0]
+            snippet = ch.get("snippet", {})
+            stats = ch.get("statistics", {})
+            subscribers = int(stats.get("subscriberCount", 0))
+            video_count = int(stats.get("videoCount", 0))
+            youtube_channel = {
+                "channel_id": ch.get("id"),
                 "channel_name": snippet.get("title"),
-                "youtube_handle": snippet.get("customUrl"),  # e.g. @OwaisBolte
+                "youtube_handle": snippet.get("customUrl"),
                 "description": snippet.get("description"),
                 "thumbnail": snippet.get("thumbnails", {}).get("default", {}).get("url"),
-                "subscribers": int(stats.get("subscriberCount", 0)),
-                "video_count": int(stats.get("videoCount", 0)),
+                "subscribers": subscribers,
+                "video_count": video_count,
                 "total_views": int(stats.get("viewCount", 0)),
-                "verified_at": datetime.now(UTC).isoformat(),
+                # Whether channel meets minimum threshold for full access
+                "meets_threshold": subscribers >= YOUTUBE_MIN_SUBSCRIBERS and video_count >= YOUTUBE_MIN_VIDEOS,
             }
 
-    # Creator with no YouTube → access_level stays limited
-    # Creator with YouTube → access_level = full
-    # Agency/Brand → access_level always full (passed hd check above)
     access_level = "limited"
     if role in ("agency", "brand"):
         access_level = "full"
-    elif role == "creator" and youtube_stats:
+    elif role == "creator" and youtube_channel and youtube_channel["meets_threshold"]:
         access_level = "full"
 
-    # Step 5: find or create user
+    # Find or create user
     result = await db.execute(select(User).where(User.google_id == google_id))
     user = result.scalar_one_or_none()
 
@@ -488,7 +539,7 @@ async def google_callback(
         result = await db.execute(select(User).where(User.email == email))
         user = result.scalar_one_or_none()
         if user:
-            user.google_id = google_id  # link existing account
+            user.google_id = google_id
 
     if not user:
         user = User(
@@ -501,65 +552,59 @@ async def google_callback(
         db.add(user)
         await db.flush()
 
-        # Build social_stats
-        social_stats: dict = {}
-        if youtube_stats:
-            social_stats["youtube"] = youtube_stats
-
-        google_handle = youtube_stats["channel_name"].lower().replace(" ", "_") if youtube_stats else email.split("@")[0]
+        handle = youtube_channel["channel_name"].lower().replace(" ", "_") if youtube_channel else email.split("@")[0]
         profile = Profile(
             user_id=user.id,
             display_name=name or email.split("@")[0],
-            handle=google_handle,
+            handle=handle,
             avatar_url=picture,
             profile_type=role,
-            youtube_channel_id=youtube_stats["channel_id"] if youtube_stats else None,
             access_level=access_level,
             is_claimed=True,
-            social_stats=social_stats if social_stats else None,
         )
         db.add(profile)
     else:
-        # Existing user — block role mismatch
         if user.role != role:
-            error_params = urlencode({
-                "error": "role_mismatch",
-                "existing_role": user.role,
-                "selected_role": role,
-            })
+            error_params = urlencode({"error": "role_mismatch", "existing_role": user.role})
             return RedirectResponse(url=f"{settings.frontend_url}/auth/callback?{error_params}")
 
-        # Refresh YouTube stats + access_level on existing profile
-        result = await db.execute(select(Profile).where(Profile.user_id == user.id))
-        profile = result.scalar_one_or_none()
-        if profile:
-            if youtube_stats:
-                existing = profile.social_stats or {}
-                existing["youtube"] = youtube_stats
-                profile.social_stats = existing
-                profile.youtube_channel_id = youtube_stats["channel_id"]
-            profile.access_level = access_level
+        # Update access_level + avatar on existing profile
+        prof_result = await db.execute(select(Profile).where(Profile.user_id == user.id))
+        prof = prof_result.scalar_one_or_none()
+        if prof:
+            prof.access_level = access_level
             if picture:
-                profile.avatar_url = picture
+                prof.avatar_url = picture
+
+    # Upsert YouTube social account if channel found
+    if youtube_channel:
+        await _get_or_create_social_account(
+            db=db,
+            user=user,
+            platform="youtube",
+            platform_account_id=youtube_channel["channel_id"],
+            username=youtube_channel.get("youtube_handle"),
+            display_name=youtube_channel.get("channel_name"),
+            avatar_url=youtube_channel.get("thumbnail"),
+            access_token=access_token,
+            refresh_token=refresh_token,
+            stats={
+                "subscribers": youtube_channel["subscribers"],
+                "video_count": youtube_channel["video_count"],
+                "total_views": youtube_channel["total_views"],
+                "youtube_handle": youtube_channel.get("youtube_handle"),
+                "description": youtube_channel.get("description"),
+                "meets_threshold": youtube_channel["meets_threshold"],
+                "threshold_requirements": {"min_subscribers": 100, "min_videos": 5},
+            },
+        )
 
     await db.commit()
     await db.refresh(user)
 
     jwt_access = create_access_token({"sub": str(user.id), "role": user.role})
     jwt_refresh = create_refresh_token({"sub": str(user.id)})
-
-    user_json = json.dumps({
-        "id": str(user.id),
-        "email": user.email,
-        "role": user.role,
-        "is_verified": user.is_verified,
-        "subscription_tier": user.subscription_tier,
+    return _build_redirect(settings.frontend_url, jwt_access, jwt_refresh, user, extra={
         "access_level": access_level,
-        "youtube_connected": youtube_stats is not None,
+        "youtube_connected": youtube_channel is not None,
     })
-    redirect_params = urlencode({
-        "access_token": jwt_access,
-        "refresh_token": jwt_refresh,
-        "user": user_json,
-    })
-    return RedirectResponse(url=f"{settings.frontend_url}/auth/callback?{redirect_params}")

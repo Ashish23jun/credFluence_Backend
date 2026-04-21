@@ -46,6 +46,41 @@ class LoggingMiddleware(BaseHTTPMiddleware):
 # Rate limiting middleware (Redis sliding window)
 # ---------------------------------------------------------------------------
 
+def _extract_client_identifier(request: Request) -> str:
+    """
+    Return a stable client identifier for rate limiting.
+
+    Priority:
+      1. Authenticated user id (from Bearer token) — so one user can't exceed limit via IP churn
+      2. X-Forwarded-For first hop — real client IP behind proxy (Nginx/Cloudflare/Dokploy)
+      3. X-Real-IP — alt proxy header
+      4. request.client.host — direct connection
+    """
+    # Try to extract user id from JWT if present
+    auth = request.headers.get("authorization")
+    if auth and auth.lower().startswith("bearer "):
+        token = auth.split(" ", 1)[1].strip()
+        try:
+            from app.core.security import decode_token
+            payload = decode_token(token)
+            uid = payload.get("sub")
+            if uid:
+                return f"user:{uid}"
+        except Exception:
+            pass  # fall through to IP-based
+
+    xff = request.headers.get("x-forwarded-for")
+    if xff:
+        # First hop is the real client (subsequent hops are proxies)
+        return f"ip:{xff.split(',')[0].strip()}"
+
+    real_ip = request.headers.get("x-real-ip")
+    if real_ip:
+        return f"ip:{real_ip.strip()}"
+
+    return f"ip:{request.client.host if request.client else 'unknown'}"
+
+
 class RateLimitMiddleware(BaseHTTPMiddleware):
     EXEMPT_PATHS = {"/health", "/docs", "/openapi.json", "/redoc"}
 
@@ -53,10 +88,10 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         if request.url.path in self.EXEMPT_PATHS:
             return await call_next(request)
 
-        client_ip = request.client.host if request.client else "unknown"
+        client_id = _extract_client_identifier(request)
         redis = await get_redis()
 
-        key = f"rate_limit:{client_ip}:{int(time.time() // 60)}"
+        key = f"rate_limit:{client_id}:{int(time.time() // 60)}"
         try:
             count = await redis.incr(key)
             if count == 1:
@@ -64,7 +99,7 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
 
             from app.core.config import settings
             if count > settings.rate_limit_requests_per_minute:
-                logger.warning("rate_limit_exceeded", ip=client_ip, count=count)
+                logger.warning("rate_limit_exceeded", client=client_id, count=count)
                 return JSONResponse(
                     status_code=status.HTTP_429_TOO_MANY_REQUESTS,
                     content={
