@@ -24,13 +24,13 @@ from app.services.otp_service import (
     store_pending_signup,
     verify_otp,
 )
+from app.services.org_service import resolve_org_for_signup
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
 
 @router.post("/register", response_model=dict, status_code=status.HTTP_201_CREATED)
 async def register(payload: RegisterRequest, db: AsyncSession = Depends(get_db)) -> dict:
-    # Check DB for existing verified account
     result = await db.execute(select(User).where(User.email == payload.email))
     if result.scalar_one_or_none():
         raise HTTPException(
@@ -38,7 +38,6 @@ async def register(payload: RegisterRequest, db: AsyncSession = Depends(get_db))
             detail="An account with this email already exists",
         )
 
-    # Store signup data in Redis — no DB write until OTP verified
     hashed = await hash_password(payload.password)
     await store_pending_signup(payload.email, hashed, payload.role)
 
@@ -58,14 +57,12 @@ async def register(payload: RegisterRequest, db: AsyncSession = Depends(get_db))
 
 @router.post("/verify-email", response_model=dict)
 async def verify_email(payload: VerifyEmailRequest, db: AsyncSession = Depends(get_db)) -> dict:
-    # Verify OTP
     if not await verify_otp(payload.email, payload.otp):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Invalid or expired OTP. Please check your email and try again.",
         )
 
-    # Retrieve pending signup data from Redis
     pending = await get_pending_signup(payload.email)
     if not pending:
         raise HTTPException(
@@ -73,12 +70,10 @@ async def verify_email(payload: VerifyEmailRequest, db: AsyncSession = Depends(g
             detail="Signup session expired. Please register again.",
         )
 
-    # Guard against race condition
     result = await db.execute(select(User).where(User.email == payload.email))
     if result.scalar_one_or_none():
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Account already exists")
 
-    # Create user in DB now that email is verified
     user = User(
         email=pending["email"],
         hashed_password=pending["hashed_password"],
@@ -86,11 +81,12 @@ async def verify_email(payload: VerifyEmailRequest, db: AsyncSession = Depends(g
         is_verified=True,
         email_verified_at=datetime.now(UTC),
     )
-    db.add(user)
+    display_name = pending["email"].split("@")[0]
+    org, membership = await resolve_org_for_signup(db, user, display_name)
+
     await db.commit()
     await db.refresh(user)
 
-    # Clean up Redis
     await delete_otp(payload.email)
     await delete_pending_signup(payload.email)
 
@@ -107,6 +103,17 @@ async def verify_email(payload: VerifyEmailRequest, db: AsyncSession = Depends(g
                 "role": user.role,
                 "is_verified": user.is_verified,
                 "subscription_tier": user.subscription_tier,
+                "onboarding_completed_at": None,
+                "org": {
+                    "id": str(org.id),
+                    "name": org.name,
+                    "slug": org.slug,
+                    "org_type": org.org_type,
+                    "verification_status": org.verification_status,
+                    "is_personal_creator_org": org.is_personal_creator_org,
+                    "membership_status": membership.status,
+                    "membership_role": membership.role,
+                },
             },
             "access_token": access_token,
             "refresh_token": refresh_token,
@@ -118,7 +125,6 @@ async def verify_email(payload: VerifyEmailRequest, db: AsyncSession = Depends(g
 
 @router.post("/resend-otp", response_model=dict)
 async def resend_otp(email: str) -> dict:
-    # Check pending signup exists — no DB lookup needed
     pending = await get_pending_signup(email)
     if not pending:
         raise HTTPException(
@@ -150,12 +156,6 @@ async def login(payload: LoginRequest, db: AsyncSession = Depends(get_db)) -> di
             detail="Invalid email or password",
         )
 
-    if user.role != payload.role:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail=f"This account is registered as '{user.role}'. Please select the correct role.",
-        )
-
     if not user.is_active:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -167,6 +167,17 @@ async def login(payload: LoginRequest, db: AsyncSession = Depends(get_db)) -> di
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Please verify your email before logging in",
         )
+
+    # Load org via relationship (already joined through organization_id)
+    from sqlalchemy.orm import selectinload
+    result2 = await db.execute(
+        select(User)
+        .options(selectinload(User.organization), selectinload(User.memberships))
+        .where(User.id == user.id)
+    )
+    user = result2.scalar_one()
+    org = user.organization
+    membership = next((m for m in user.memberships if m.organization_id == org.id), None)
 
     access_token = create_access_token({"sub": str(user.id), "role": user.role})
     refresh_token = create_refresh_token({"sub": str(user.id)})
@@ -181,6 +192,20 @@ async def login(payload: LoginRequest, db: AsyncSession = Depends(get_db)) -> di
                 "role": user.role,
                 "is_verified": user.is_verified,
                 "subscription_tier": user.subscription_tier,
+                "onboarding_completed_at": (
+                    user.onboarding_completed_at.isoformat()
+                    if user.onboarding_completed_at else None
+                ),
+                "org": {
+                    "id": str(org.id),
+                    "name": org.name,
+                    "slug": org.slug,
+                    "org_type": org.org_type,
+                    "verification_status": org.verification_status,
+                    "is_personal_creator_org": org.is_personal_creator_org,
+                    "membership_status": membership.status if membership else None,
+                    "membership_role": membership.role if membership else None,
+                } if org else None,
             },
             "access_token": access_token,
             "refresh_token": refresh_token,

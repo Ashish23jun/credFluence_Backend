@@ -1,7 +1,7 @@
 import uuid
 from datetime import UTC, datetime
 
-from sqlalchemy import Boolean, DateTime, Enum, String, Text
+from sqlalchemy import Boolean, DateTime, Enum, ForeignKey, String, Text
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -22,13 +22,23 @@ class User(Base):
     )
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     is_verified: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
-    is_admin: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     email_verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     # OAuth
     google_id: Mapped[str | None] = mapped_column(String(255), nullable=True, unique=True)
     linkedin_id: Mapped[str | None] = mapped_column(String(255), nullable=True, unique=True)
     instagram_id: Mapped[str | None] = mapped_column(String(255), nullable=True, unique=True)
+
+    # Organization membership
+    organization_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("organizations.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    onboarding_completed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
     # Encrypted phone
     phone_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -54,7 +64,10 @@ class User(Base):
     )
 
     # Relationships
-    profile: Mapped["Profile"] = relationship("Profile", back_populates="user", uselist=False)
+    organization: Mapped["Organization"] = relationship("Organization", back_populates="users")
+    memberships: Mapped[list["OrganizationMembership"]] = relationship(
+        "OrganizationMembership", back_populates="user", cascade="all, delete-orphan"
+    )
     social_accounts: Mapped[list["SocialAccount"]] = relationship(
         "SocialAccount", back_populates="user", cascade="all, delete-orphan"
     )

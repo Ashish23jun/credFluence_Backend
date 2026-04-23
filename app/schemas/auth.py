@@ -1,8 +1,7 @@
-from pydantic import BaseModel, EmailStr, field_validator
-from pydantic import model_validator  # noqa
+from pydantic import BaseModel, EmailStr, field_validator, model_validator
 
 # ---------------------------------------------------------------------------
-# Request schemas
+# Domain blocklist — only applies to agency/brand, NOT creators
 # ---------------------------------------------------------------------------
 
 BLOCKED_EMAIL_DOMAINS = {
@@ -40,29 +39,22 @@ class RegisterRequest(BaseModel):
             raise ValueError("Role must be one of: creator, agency, brand")
         return v
 
-    @field_validator("email")
-    @classmethod
-    def business_email_only(cls, v: str) -> str:
-        domain = v.split("@")[-1].lower()
-        if domain in BLOCKED_EMAIL_DOMAINS:
-            raise ValueError(
-                "Please use a business email address. "
-                "Free email providers (Gmail, Yahoo, etc.) are not allowed."
-            )
-        return v
+    @model_validator(mode="after")
+    def business_email_for_non_creators(self) -> "RegisterRequest":
+        # Creators are individuals — personal email domains are allowed
+        if self.role in ("agency", "brand"):
+            domain = self.email.split("@")[-1].lower()
+            if domain in BLOCKED_EMAIL_DOMAINS:
+                raise ValueError(
+                    "Agencies and brands must use a business email address. "
+                    "Free email providers (Gmail, Yahoo, etc.) are not allowed."
+                )
+        return self
 
 
 class LoginRequest(BaseModel):
     email: EmailStr
     password: str
-    role: str  # creator | agency | brand
-
-    @field_validator("role")
-    @classmethod
-    def valid_role(cls, v: str) -> str:
-        if v not in ("creator", "agency", "brand"):
-            raise ValueError("Role must be one of: creator, agency, brand")
-        return v
 
 
 class RefreshRequest(BaseModel):
@@ -82,7 +74,7 @@ class TokenResponse(BaseModel):
     access_token: str
     refresh_token: str
     token_type: str = "bearer"
-    expires_in: int  # seconds
+    expires_in: int
 
 
 class UserResponse(BaseModel):

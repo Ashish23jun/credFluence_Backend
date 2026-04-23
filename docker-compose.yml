@@ -15,13 +15,10 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
-      minio:
-        condition: service_healthy
-      minio-init:
-        condition: service_completed_successfully
     volumes:
       - ./app:/app/app
       - ./migrations:/app/migrations
+      - ./scripts:/app/scripts
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
     networks:
       - credfluence
@@ -79,45 +76,6 @@ services:
     restart: unless-stopped
 
   # ──────────────────────────────────────────────
-  # MinIO (S3-compatible storage)
-  # ──────────────────────────────────────────────
-  minio:
-    image: minio/minio:latest
-    ports:
-      - "9000:9000"    # S3 API
-      - "9001:9001"    # Web console → open http://localhost:9001
-    environment:
-      MINIO_ROOT_USER: minioadmin
-      MINIO_ROOT_PASSWORD: minioadmin
-    volumes:
-      - minio_data:/data
-    command: server /data --console-address ":9001"
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-    networks:
-      - credfluence
-    restart: unless-stopped
-
-  # Creates the proof-uploads bucket on first run
-  minio-init:
-    image: minio/mc:latest
-    depends_on:
-      minio:
-        condition: service_healthy
-    entrypoint: >
-      /bin/sh -c "
-        mc alias set local http://minio:9000 minioadmin minioadmin &&
-        mc mb --ignore-existing local/credfluence-proofs &&
-        mc anonymous set none local/credfluence-proofs &&
-        echo 'Bucket credfluence-proofs ready'
-      "
-    networks:
-      - credfluence
-
-  # ──────────────────────────────────────────────
   # Mailpit (local email catcher — ARM64 native)
   # ──────────────────────────────────────────────
   mailhog:
@@ -170,7 +128,6 @@ services:
 volumes:
   postgres_data:
   redis_data:
-  minio_data:
 
 networks:
   credfluence:

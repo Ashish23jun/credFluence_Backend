@@ -56,6 +56,26 @@ def create_refresh_token(payload: dict) -> str:
     return jwt.encode(data, private_key, algorithm=settings.jwt_algorithm)
 
 
+def create_admin_access_token(admin_id: str) -> str:
+    data: dict = {"sub": admin_id, "type": "admin_access"}
+    expire = datetime.now(UTC) + timedelta(minutes=settings.jwt_access_token_expire_minutes)
+    data["exp"] = expire
+    private_key = settings.jwt_private_key
+    if not private_key:
+        return jwt.encode(data, settings.app_secret_key, algorithm="HS256")
+    return jwt.encode(data, private_key, algorithm=settings.jwt_algorithm)
+
+
+def create_admin_refresh_token(admin_id: str) -> str:
+    data: dict = {"sub": admin_id, "type": "admin_refresh"}
+    expire = datetime.now(UTC) + timedelta(days=settings.jwt_refresh_token_expire_days)
+    data["exp"] = expire
+    private_key = settings.jwt_private_key
+    if not private_key:
+        return jwt.encode(data, settings.app_secret_key, algorithm="HS256")
+    return jwt.encode(data, private_key, algorithm=settings.jwt_algorithm)
+
+
 def decode_token(token: str) -> dict:
     public_key = settings.jwt_public_key
     try:

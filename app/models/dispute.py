@@ -21,6 +21,12 @@ class Dispute(Base):
         UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=False, index=True
     )
 
+    type: Mapped[str] = mapped_column(
+        Enum("verification", "duplicate_name", "false_claim", name="dispute_type"),
+        nullable=False,
+        index=True,
+    )
+
     reason: Mapped[str] = mapped_column(Text, nullable=False)
 
     # Counter-evidence files (S3 keys)
@@ -51,3 +57,6 @@ class Dispute(Base):
 
     # Relationships
     review: Mapped["Review"] = relationship("Review", back_populates="dispute")
+    recipients: Mapped[list["DisputeRecipient"]] = relationship(
+        "DisputeRecipient", back_populates="dispute", cascade="all, delete-orphan"
+    )

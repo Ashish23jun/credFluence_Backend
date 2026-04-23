@@ -16,7 +16,7 @@ Read `.claude/backend/SKILL.md` before writing any backend code.
 - All handlers are `async def` — no sync routes ever
 - All config from `app.core.config.settings` — never `os.getenv()`
 - Every schema change → new Alembic migration, never `ALTER TABLE`
-- `trust_score` default is **500** (not 600)
+- `trust_score` default is **450** (not 500, not 600)
 - Social stats in `social_accounts.stats`, NOT on Profile
 - User auth Redis key: `user:{user_id}` (not `user_auth:`)
 - Shared httpx client: `await get_http_client()` from `app.core.http_client`

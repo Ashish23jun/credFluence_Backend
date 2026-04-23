@@ -1,7 +1,7 @@
 import uuid
 from datetime import UTC, datetime
 
-from sqlalchemy import Boolean, DateTime, Enum, ForeignKey, Float, Integer, String, Text
+from sqlalchemy import Boolean, DateTime, Enum, ForeignKey, Integer, String, Text
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -14,8 +14,13 @@ class Profile(Base):
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
     )
-    user_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
+    # Owned by Organization (1:1); UNIQUE enforced via unique=True
+    organization_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("organizations.id", ondelete="CASCADE"),
+        nullable=False,
+        unique=True,
+        index=True,
     )
 
     # Identity
@@ -33,8 +38,8 @@ class Profile(Base):
     )
     category: Mapped[str | None] = mapped_column(String(100), nullable=True, index=True)
 
-    # Trust score (300–900)
-    trust_score: Mapped[int] = mapped_column(Integer, default=500, nullable=False)
+    # Trust score (300–900); default 450, updated after verification
+    trust_score: Mapped[int] = mapped_column(Integer, default=450, nullable=False)
     review_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
 
     # AI-generated summary tags
@@ -68,7 +73,7 @@ class Profile(Base):
     )
 
     # Relationships
-    user: Mapped["User"] = relationship("User", back_populates="profile")
+    organization: Mapped["Organization"] = relationship("Organization", back_populates="profile")
     reviews_received: Mapped[list["Review"]] = relationship(
         "Review", foreign_keys="Review.target_profile_id", back_populates="target_profile"
     )

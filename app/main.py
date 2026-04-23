@@ -49,13 +49,15 @@ app.add_exception_handler(Exception, global_exception_handler)
 # ---------------------------------------------------------------------------
 # Routers
 # ---------------------------------------------------------------------------
-from app.routers import admin, auth, disputes, notifications, oauth, profiles, reviews
+from app.routers import admin, admin_auth, auth, disputes, notifications, oauth, onboarding, profiles, reviews
 
 app.include_router(auth.router)
 app.include_router(oauth.router)
+app.include_router(onboarding.router)
 app.include_router(profiles.router)
 app.include_router(reviews.router)
 app.include_router(disputes.router)
+app.include_router(admin_auth.router)
 app.include_router(admin.router)
 app.include_router(notifications.router)
 
@@ -87,19 +89,22 @@ async def health_check() -> dict:
     except Exception as e:
         checks["redis"] = f"error: {e}"
 
-    # S3 / MinIO
+    # AWS S3
     try:
         import boto3
         from botocore.config import Config
 
-        s3 = boto3.client(
-            "s3",
-            endpoint_url=settings.s3_endpoint_url,
-            aws_access_key_id=settings.s3_access_key,
-            aws_secret_access_key=settings.s3_secret_key,
-            config=Config(connect_timeout=2, read_timeout=2),
-        )
-        s3.list_buckets()
+        client_kwargs: dict = {
+            "aws_access_key_id": settings.s3_access_key,
+            "aws_secret_access_key": settings.s3_secret_key,
+            "region_name": settings.s3_region,
+            "config": Config(connect_timeout=2, read_timeout=2),
+        }
+        if settings.s3_endpoint_url:
+            client_kwargs["endpoint_url"] = settings.s3_endpoint_url
+
+        s3 = boto3.client("s3", **client_kwargs)
+        s3.head_bucket(Bucket=settings.s3_bucket_name.strip())
         checks["storage"] = "ok"
     except Exception as e:
         checks["storage"] = f"error: {e}"
