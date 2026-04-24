@@ -113,6 +113,7 @@ async def onboarding_me(
             "username": sa.username,
             "display_name": sa.display_name,
             "avatar_url": sa.avatar_url,
+            "stats": sa.stats,
         }
         for sa in user.social_accounts
     ]
@@ -312,17 +313,29 @@ async def complete_onboarding(
     current_user: dict = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
-    result = await db.execute(select(User).where(User.id == current_user["id"]))
+    result = await db.execute(
+        select(User)
+        .options(selectinload(User.organization))
+        .where(User.id == current_user["id"])
+    )
     user = result.scalar_one()
 
     if user.onboarding_completed_at:
-        return {"success": True, "message": "Onboarding already completed.", "data": {}}
+        return {
+            "success": True,
+            "message": "Onboarding already completed.",
+            "data": {"verification_status": user.organization.verification_status if user.organization else None},
+        }
 
     user.onboarding_completed_at = datetime.now(UTC)
     await db.commit()
     await cache_delete(user_key(str(user.id)))
 
-    return {"success": True, "message": "Onboarding complete.", "data": {}}
+    return {
+        "success": True,
+        "message": "Onboarding complete.",
+        "data": {"verification_status": user.organization.verification_status if user.organization else None},
+    }
 
 
 # ---------------------------------------------------------------------------

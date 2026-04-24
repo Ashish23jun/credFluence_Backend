@@ -309,8 +309,8 @@ async def google_callback(
                 "total_views": int(stats.get("viewCount", 0)),
                 "youtube_handle": snippet.get("customUrl"),
                 "description": snippet.get("description"),
-                "meets_threshold": subscribers >= 500 and video_count >= 5,
-                "threshold_requirements": {"min_subscribers": 500, "min_videos": 5},
+                "meets_threshold": subscribers >= 1 and video_count >= 0,
+                "threshold_requirements": {"min_subscribers": 1, "min_videos": 0},
             },
         )
         await _maybe_verify_creator(db, user)
