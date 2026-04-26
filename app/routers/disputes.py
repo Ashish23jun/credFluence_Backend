@@ -1,13 +1,16 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
 from app.core.dependencies import get_current_user
-from app.models.dispute import Dispute
-from app.models.dispute_recipient import DisputeRecipient
-from app.models.review import Review
+from app.repositories.dispute_repo import (
+    create_dispute_with_recipient,
+    get_review_by_id,
+    list_disputes_for_org,
+    list_disputes_for_user,
+)
+from app.services.dispute_service import route_dispute
 
 router = APIRouter(prefix="/disputes", tags=["disputes"])
 
@@ -18,7 +21,7 @@ class DisputeCreatePayload(BaseModel):
     review_id: str
     type: str
     reason: str
-    target_org_id: str | None = None  # required for duplicate_name + false_claim
+    target_org_id: str | None = None
 
 
 @router.post("", response_model=dict, status_code=status.HTTP_201_CREATED)
@@ -32,53 +35,31 @@ async def create_dispute(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail=f"type must be one of: {', '.join(VALID_TYPES)}",
         )
-
     if payload.type in ("duplicate_name", "false_claim") and not payload.target_org_id:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail="target_org_id is required for duplicate_name and false_claim disputes",
         )
 
-    # Verify review exists
-    result = await db.execute(select(Review).where(Review.id == payload.review_id))
-    review = result.scalar_one_or_none()
+    review = await get_review_by_id(db, payload.review_id)
     if not review:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Review not found")
 
-    dispute = Dispute(
+    recipient_type, recipient_org_id = route_dispute(payload.type, payload.target_org_id)
+    dispute = await create_dispute_with_recipient(
+        db,
         review_id=review.id,
         filed_by_user_id=current_user["id"],
-        type=payload.type,
+        dispute_type=payload.type,
         reason=payload.reason,
-        status="open",
+        recipient_type=recipient_type,
+        target_org_id=recipient_org_id,
     )
-    db.add(dispute)
-    await db.flush()
-
-    # Route based on type
-    if payload.type == "verification":
-        db.add(DisputeRecipient(
-            dispute_id=dispute.id,
-            recipient_type="platform_admin",
-        ))
-    else:
-        db.add(DisputeRecipient(
-            dispute_id=dispute.id,
-            recipient_type="org_admin",
-            recipient_org_id=payload.target_org_id,
-        ))
-
-    await db.commit()
-    await db.refresh(dispute)
 
     return {
         "success": True,
         "message": "Dispute filed successfully",
-        "data": {
-            "id": str(dispute.id),
-            "type": dispute.type,
-            "status": dispute.status,
-        },
+        "data": {"id": str(dispute.id), "type": dispute.type, "status": dispute.status},
     }
 
 
@@ -87,27 +68,15 @@ async def list_disputes(
     current_user: dict = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
-    user_org_id = current_user.get("org", {}).get("id") if current_user.get("org") else None
-    is_org_admin = (
-        current_user.get("org", {}).get("membership_role") == "admin"
-        if current_user.get("org") else False
-    )
+    org = current_user.get("org") or {}
+    is_org_admin = org.get("membership_role") == "admin"
+    org_id = org.get("id")
 
-    if is_org_admin and user_org_id:
-        # Org admins see disputes targeting their org
-        result = await db.execute(
-            select(Dispute).join(DisputeRecipient).where(
-                DisputeRecipient.recipient_type == "org_admin",
-                DisputeRecipient.recipient_org_id == user_org_id,
-            )
-        )
+    if is_org_admin and org_id:
+        disputes = await list_disputes_for_org(db, org_id)
     else:
-        # Regular users see their own filed disputes
-        result = await db.execute(
-            select(Dispute).where(Dispute.filed_by_user_id == current_user["id"])
-        )
+        disputes = await list_disputes_for_user(db, current_user["id"])
 
-    disputes = result.scalars().all()
     return {
         "success": True,
         "message": "OK",

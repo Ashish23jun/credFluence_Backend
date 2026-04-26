@@ -5,28 +5,26 @@ Endpoints are reachable by any authenticated user regardless of
 onboarding_completed_at or org.verification_status.
 """
 
-import asyncio
 import re
 import uuid
 from datetime import UTC, datetime
 
-import boto3
-from botocore.config import Config
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, field_validator, model_validator
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import selectinload
 
 from app.core.cache import cache_delete, user_key
-from app.core.config import settings
 from app.core.database import get_db
 from app.core.dependencies import get_current_user, require_org_admin
-from app.models.organization import Organization
-from app.models.organization_membership import OrganizationMembership
-from app.models.profile import Profile
-from app.models.user import User
+from app.repositories.org_repo import (
+    get_org_by_id,
+    get_profile_by_org_id,
+    list_pending_memberships,
+)
+from app.repositories.user_repo import get_user_with_org_and_social
+from app.services.onboarding_service import build_docs_dict, build_onboarding_context
 from app.services.org_service import approve_membership, reject_membership
+from app.services.storage_service import presign_put
 
 router = APIRouter(prefix="/onboarding", tags=["onboarding"])
 
@@ -70,10 +68,13 @@ class VerificationDocsPayload(BaseModel):
         return self
 
 
+class PresignRequest(BaseModel):
+    filename: str
+    content_type: str
 
 
 # ---------------------------------------------------------------------------
-# GET /onboarding/me — full onboarding context
+# GET /onboarding/me
 # ---------------------------------------------------------------------------
 
 @router.get("/me", response_model=dict)
@@ -81,87 +82,22 @@ async def onboarding_me(
     current_user: dict = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
-    user_id = current_user["id"]
-
-    result = await db.execute(
-        select(User)
-        .options(
-            selectinload(User.organization),
-            selectinload(User.memberships),
-            selectinload(User.social_accounts),
-        )
-        .where(User.id == user_id)
-    )
-    user = result.scalar_one()
+    user = await get_user_with_org_and_social(db, current_user["id"])
     org = user.organization
-
-    # Load org profile
-    profile = None
-    if org:
-        prof_result = await db.execute(
-            select(Profile).where(Profile.organization_id == org.id)
-        )
-        profile = prof_result.scalar_one_or_none()
-
+    profile = await get_profile_by_org_id(db, org.id) if org else None
     membership = next(
         (m for m in user.memberships if m.organization_id == org.id), None
     ) if org else None
 
-    connected_platforms = [
-        {
-            "platform": sa.platform,
-            "username": sa.username,
-            "display_name": sa.display_name,
-            "avatar_url": sa.avatar_url,
-            "stats": sa.stats,
-        }
-        for sa in user.social_accounts
-    ]
-
     return {
         "success": True,
         "message": "OK",
-        "data": {
-            "user": {
-                "id": str(user.id),
-                "email": user.email,
-                "role": user.role,
-                "subscription_tier": user.subscription_tier,
-                "onboarding_completed_at": (
-                    user.onboarding_completed_at.isoformat()
-                    if user.onboarding_completed_at else None
-                ),
-            },
-            "org": {
-                "id": str(org.id),
-                "name": org.name,
-                "slug": org.slug,
-                "org_type": org.org_type,
-                "verification_status": org.verification_status,
-                "is_personal_creator_org": org.is_personal_creator_org,
-                "rejected_reason": org.rejected_reason,
-                "verification_docs": org.verification_docs,
-            } if org else None,
-            "profile": {
-                "display_name": profile.display_name if profile else None,
-                "bio": profile.bio if profile else None,
-                "category": profile.category if profile else None,
-                "location": profile.location if profile else None,
-                "avatar_url": profile.avatar_url if profile else None,
-                "trust_score": profile.trust_score if profile else None,
-                "access_level": profile.access_level if profile else None,
-            } if profile else None,
-            "membership": {
-                "role": membership.role,
-                "status": membership.status,
-            } if membership else None,
-            "connected_platforms": connected_platforms,
-        },
+        "data": build_onboarding_context(user, org, profile, membership, user.social_accounts),
     }
 
 
 # ---------------------------------------------------------------------------
-# PATCH /onboarding/org — update org name + profile details
+# PATCH /onboarding/org
 # ---------------------------------------------------------------------------
 
 @router.patch("/org", response_model=dict)
@@ -171,14 +107,8 @@ async def update_org(
     db: AsyncSession = Depends(get_db),
 ) -> dict:
     org_id = current_user["org"]["id"]
-
-    result = await db.execute(select(Organization).where(Organization.id == org_id))
-    org = result.scalar_one()
-
-    prof_result = await db.execute(
-        select(Profile).where(Profile.organization_id == org_id)
-    )
-    profile = prof_result.scalar_one_or_none()
+    org = await get_org_by_id(db, org_id)
+    profile = await get_profile_by_org_id(db, org_id)
 
     if payload.name is not None:
         org.name = payload.name
@@ -202,41 +132,8 @@ async def update_org(
 
 
 # ---------------------------------------------------------------------------
-# Shared S3 client helper
+# POST /onboarding/upload-doc/presign
 # ---------------------------------------------------------------------------
-
-def _s3_client() -> "boto3.client":
-    return boto3.client(
-        "s3",
-        aws_access_key_id=settings.s3_access_key,
-        aws_secret_access_key=settings.s3_secret_key,
-        region_name=settings.s3_region,
-        config=Config(
-            connect_timeout=5,
-            read_timeout=10,
-            signature_version="s3v4",
-            s3={"addressing_style": "virtual"},
-        ),
-    )
-
-
-def _presign_get(key: str, expires: int = 3600) -> str:
-    s3 = _s3_client()
-    return s3.generate_presigned_url(
-        "get_object",
-        Params={"Bucket": settings.s3_bucket_name.strip(), "Key": key},
-        ExpiresIn=expires,
-    )
-
-
-# ---------------------------------------------------------------------------
-# POST /onboarding/upload-doc/presign — return a presigned PUT URL for direct S3 upload
-# ---------------------------------------------------------------------------
-
-class PresignRequest(BaseModel):
-    filename: str
-    content_type: str
-
 
 @router.post("/upload-doc/presign", response_model=dict)
 async def presign_doc_upload(
@@ -249,20 +146,7 @@ async def presign_doc_upload(
     ext_map = {"image/jpeg": "jpg", "image/png": "png", "application/pdf": "pdf"}
     ext = ext_map.get(payload.content_type, "bin")
     key = f"verification-docs/{current_user['org']['id']}/{uuid.uuid4()}.{ext}"
-
-    def _presign() -> str:
-        s3 = _s3_client()
-        return s3.generate_presigned_url(
-            "put_object",
-            Params={
-                "Bucket": settings.s3_bucket_name.strip(),
-                "Key": key,
-                "ContentType": payload.content_type,
-            },
-            ExpiresIn=300,  # 5 minutes to complete the upload
-        )
-
-    upload_url = await asyncio.to_thread(_presign)
+    upload_url = await presign_put(key, payload.content_type)
 
     return {
         "success": True,
@@ -272,7 +156,7 @@ async def presign_doc_upload(
 
 
 # ---------------------------------------------------------------------------
-# PATCH /onboarding/docs — save verification document metadata
+# PATCH /onboarding/docs
 # ---------------------------------------------------------------------------
 
 @router.patch("/docs", response_model=dict)
@@ -281,31 +165,14 @@ async def save_verification_docs(
     current_user: dict = Depends(require_org_admin),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
-    org_id = current_user["org"]["id"]
-    result = await db.execute(select(Organization).where(Organization.id == org_id))
-    org = result.scalar_one()
-
-    org.verification_docs = {
-        "website": payload.website,
-        "gst": {
-            "number": payload.gst_number or None,
-            "file_key": payload.gst_file_url or None,
-        },
-        "cin": {
-            "number": payload.cin_number or None,
-            "file_key": payload.cin_file_url or None,
-        },
-        "trademark": {
-            "file_key": payload.trademark_file_url or None,
-        },
-    }
-
+    org = await get_org_by_id(db, current_user["org"]["id"])
+    org.verification_docs = build_docs_dict(payload)
     await db.commit()
     return {"success": True, "message": "Documents saved.", "data": {}}
 
 
 # ---------------------------------------------------------------------------
-# POST /onboarding/complete — mark onboarding done
+# POST /onboarding/complete
 # ---------------------------------------------------------------------------
 
 @router.post("/complete", response_model=dict)
@@ -313,18 +180,16 @@ async def complete_onboarding(
     current_user: dict = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
-    result = await db.execute(
-        select(User)
-        .options(selectinload(User.organization))
-        .where(User.id == current_user["id"])
-    )
-    user = result.scalar_one()
+    user = await get_user_with_org_and_social(db, current_user["id"])
 
     if user.onboarding_completed_at:
         return {
             "success": True,
             "message": "Onboarding already completed.",
-            "data": {"verification_status": user.organization.verification_status if user.organization else None},
+            "data": {
+                "verification_status": user.organization.verification_status
+                if user.organization else None
+            },
         }
 
     user.onboarding_completed_at = datetime.now(UTC)
@@ -334,12 +199,15 @@ async def complete_onboarding(
     return {
         "success": True,
         "message": "Onboarding complete.",
-        "data": {"verification_status": user.organization.verification_status if user.organization else None},
+        "data": {
+            "verification_status": user.organization.verification_status
+            if user.organization else None
+        },
     }
 
 
 # ---------------------------------------------------------------------------
-# GET /onboarding/memberships/pending — list pending members (org admin only)
+# GET /onboarding/memberships/pending
 # ---------------------------------------------------------------------------
 
 @router.get("/memberships/pending", response_model=dict)
@@ -347,18 +215,7 @@ async def list_pending_members(
     current_user: dict = Depends(require_org_admin),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
-    org_id = current_user["org"]["id"]
-
-    result = await db.execute(
-        select(OrganizationMembership)
-        .options(selectinload(OrganizationMembership.user))
-        .where(
-            OrganizationMembership.organization_id == org_id,
-            OrganizationMembership.status == "pending",
-        )
-    )
-    memberships = result.scalars().all()
-
+    memberships = await list_pending_memberships(db, current_user["org"]["id"])
     return {
         "success": True,
         "message": "OK",
@@ -384,9 +241,8 @@ async def approve_member(
     current_user: dict = Depends(require_org_admin),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
-    org_id = current_user["org"]["id"]
     try:
-        membership = await approve_membership(db, org_id, member_user_id, current_user["id"])
+        membership = await approve_membership(db, current_user["org"]["id"], member_user_id, current_user["id"])
         await db.commit()
         await cache_delete(user_key(member_user_id))
     except Exception:
@@ -409,9 +265,8 @@ async def reject_member(
     current_user: dict = Depends(require_org_admin),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
-    org_id = current_user["org"]["id"]
     try:
-        membership = await reject_membership(db, org_id, member_user_id, current_user["id"])
+        membership = await reject_membership(db, current_user["org"]["id"], member_user_id, current_user["id"])
         await db.commit()
         await cache_delete(user_key(member_user_id))
     except Exception:

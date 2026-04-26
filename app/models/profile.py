@@ -42,6 +42,12 @@ class Profile(Base):
     trust_score: Mapped[int] = mapped_column(Integer, default=450, nullable=False)
     review_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
 
+    # Niches / content verticals (array of strings e.g. ["fashion", "lifestyle"])
+    niches: Mapped[list | None] = mapped_column(JSONB, nullable=True)
+
+    # Languages spoken (array of strings e.g. ["Hindi", "English"])
+    languages: Mapped[list | None] = mapped_column(JSONB, nullable=True)
+
     # AI-generated summary tags
     ai_summary_tags: Mapped[list | None] = mapped_column(JSONB, nullable=True)
 
