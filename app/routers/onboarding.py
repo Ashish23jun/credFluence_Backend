@@ -35,12 +35,21 @@ _ALLOWED_MIME = {"image/jpeg", "image/png", "application/pdf"}
 # Schemas
 # ---------------------------------------------------------------------------
 
+class SocialLinkItem(BaseModel):
+    platform: str   # instagram | youtube | linkedin | twitter | facebook | tiktok
+    url: str
+    label: str | None = None  # optional display label e.g. "Main Page", "India"
+
+
 class OrgUpdatePayload(BaseModel):
     name: str | None = None
     bio: str | None = None
     category: str | None = None
     location: str | None = None
     avatar_url: str | None = None
+    languages: list[str] | None = None
+    niches: list[str] | None = None
+    social_links: list[SocialLinkItem] | None = None  # agency/brand only
 
 
 _GST_RE = re.compile(r"^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z]{1}[1-9A-Z]{1}Z[0-9A-Z]{1}$")
@@ -124,6 +133,13 @@ async def update_org(
             profile.avatar_url = payload.avatar_url
         if payload.name is not None:
             profile.display_name = payload.name
+            profile.handle = org.slug
+        if payload.languages is not None:
+            profile.languages = payload.languages
+        if payload.niches is not None:
+            profile.niches = payload.niches
+        if payload.social_links is not None:
+            profile.social_links = [lnk.model_dump(exclude_none=True) for lnk in payload.social_links]
 
     await db.commit()
     await cache_delete(user_key(current_user["id"]))

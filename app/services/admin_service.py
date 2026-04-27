@@ -63,6 +63,9 @@ def serialize_org_detail(org, social_accounts: list) -> dict:
             "avatar_url": profile.avatar_url if profile else None,
             "trust_score": profile.trust_score if profile else None,
             "access_level": profile.access_level if profile else None,
+            "niches": profile.niches or [] if profile else [],
+            "languages": profile.languages or [] if profile else [],
+            "social_links": profile.social_links or [] if profile else [],
         } if profile else None,
         "members": [
             {

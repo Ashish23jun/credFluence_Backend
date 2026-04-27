@@ -2,6 +2,7 @@
 Profiles router — public read-only endpoints.
 
 GET /profiles                    — paginated list with filters
+GET /profiles/leaderboard        — top profiles by trust score (Redis cached, 5 min TTL)
 GET /profiles/{handle}           — single profile detail
 GET /profiles/{handle}/reviews   — paginated reviews for a profile
 """
@@ -9,6 +10,7 @@ GET /profiles/{handle}/reviews   — paginated reviews for a profile
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.cache import cache_get, cache_set
 from app.core.database import get_db
 from app.models.profile import Profile
 from app.models.review import Review
@@ -17,6 +19,8 @@ from app.repositories.social_account_repo import get_accounts_by_org_ids
 from app.services import profile_service
 
 router = APIRouter(prefix="/profiles", tags=["profiles"])
+
+_LEADERBOARD_TTL = 300  # 5 minutes
 
 _VALID_KINDS = ("creator", "agency", "brand")
 _VALID_SORTS = ("trust_desc", "trust_asc", "review_count", "newest")
@@ -34,12 +38,15 @@ async def list_profiles(
     sort: str = Query("trust_desc"),
     page: int = Query(1, ge=1),
     limit: int = Query(20, ge=1, le=50),
+    q: str | None = Query(None, description="Full-text search across name, handle, bio"),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
     if kind and kind not in _VALID_KINDS:
         raise HTTPException(status_code=400, detail=f"kind must be one of {_VALID_KINDS}")
     if sort not in _VALID_SORTS:
         sort = "trust_desc"
+
+    search_query = q.strip() if q and q.strip() else None
 
     filters = [
         Profile.is_opted_out.is_(False),
@@ -57,9 +64,10 @@ async def list_profiles(
         "newest":       Profile.created_at.desc(),
     }[sort]
 
-    total = await profile_repo.count_profiles(db, filters)
+    total = await profile_repo.count_profiles(db, filters, search_query=search_query)
     profiles = await profile_repo.get_profiles_page(
-        db, filters, order_col, offset=(page - 1) * limit, limit=limit
+        db, filters, order_col, offset=(page - 1) * limit, limit=limit,
+        search_query=search_query,
     )
 
     if not profiles:
@@ -92,6 +100,38 @@ async def list_profiles(
         "limit": limit,
         "pages": -(-total // limit),
     }}
+
+
+# ---------------------------------------------------------------------------
+# GET /profiles/leaderboard
+# ---------------------------------------------------------------------------
+
+@router.get("/leaderboard")
+async def get_leaderboard(
+    role: str | None = Query(None, description="creator | agency | brand"),
+    category: str | None = Query(None),
+    limit: int = Query(20, ge=1, le=50),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    clean_role = role if role in _VALID_KINDS else None
+    cache_key = f"leaderboard:{clean_role or 'all'}:{category or 'all'}:{limit}"
+
+    cached = await cache_get(cache_key)
+    if cached:
+        return cached
+
+    profiles = await profile_repo.get_leaderboard_profiles(db, clean_role, category, limit)
+    org_ids = [p.organization_id for p in profiles]
+    org_sa_map = await get_accounts_by_org_ids(db, org_ids)
+
+    items = [
+        profile_service.build_leaderboard_item(p, p.organization, org_sa_map.get(str(p.organization_id), []))
+        for p in profiles
+    ]
+
+    response = {"success": True, "message": "OK", "data": items}
+    await cache_set(cache_key, response, ttl_seconds=_LEADERBOARD_TTL)
+    return response
 
 
 # ---------------------------------------------------------------------------

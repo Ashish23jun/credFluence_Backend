@@ -1,4 +1,4 @@
-from sqlalchemy import func, select
+from sqlalchemy import Float, cast, func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -7,6 +7,32 @@ from app.models.review import Review
 from app.models.tag_aggregation import TagAggregation
 
 _PUBLIC_STATUSES = ("verified", "in_dispute_window", "disputed")
+_TRGM_THRESHOLD = 0.2  # word_similarity score floor for fuzzy match
+
+
+def _search_filter(q: str):
+    """Return an OR filter covering tsvector FTS + trigram fuzzy on name/handle."""
+    tsq = func.websearch_to_tsquery("simple", q)
+    return or_(
+        Profile.search_vector.op("@@")(tsq),
+        func.word_similarity(q, Profile.display_name) > _TRGM_THRESHOLD,
+        func.word_similarity(q, Profile.handle) > _TRGM_THRESHOLD,
+        Profile.display_name.ilike(f"%{q}%"),
+        Profile.handle.ilike(f"%{q}%"),
+    )
+
+
+def _search_order(q: str):
+    """Rank by ts_rank_cd (cover density, length-normalised) then trust_score."""
+    tsq = func.websearch_to_tsquery("simple", q)
+    rank = func.ts_rank_cd(Profile.search_vector, tsq, 32)
+    trgm = func.greatest(
+        func.word_similarity(q, Profile.display_name),
+        func.word_similarity(q, Profile.handle),
+    )
+    # Combined: FTS rank * 0.7 + trigram score * 0.3
+    combined = cast(rank * 0.7 + trgm * 0.3, Float)
+    return combined.desc()
 
 
 async def get_profiles_page(
@@ -15,22 +41,31 @@ async def get_profiles_page(
     order_col,
     offset: int,
     limit: int,
+    search_query: str | None = None,
 ) -> list[Profile]:
-    result = await db.execute(
+    stmt = (
         select(Profile)
         .options(selectinload(Profile.organization))
         .where(*filters)
-        .order_by(order_col)
+        .order_by(_search_order(search_query) if search_query else order_col)
         .offset(offset)
         .limit(limit)
     )
+    if search_query:
+        stmt = stmt.where(_search_filter(search_query))
+    result = await db.execute(stmt)
     return result.scalars().all()
 
 
-async def count_profiles(db: AsyncSession, filters: list) -> int:
-    return (
-        await db.execute(select(func.count(Profile.id)).where(*filters))
-    ).scalar_one()
+async def count_profiles(
+    db: AsyncSession,
+    filters: list,
+    search_query: str | None = None,
+) -> int:
+    stmt = select(func.count(Profile.id)).where(*filters)
+    if search_query:
+        stmt = stmt.where(_search_filter(search_query))
+    return (await db.execute(stmt)).scalar_one()
 
 
 async def get_avg_ratings_for_profiles(
@@ -69,6 +104,32 @@ async def get_tags_for_profiles(
         if len(bucket) < 3:
             bucket.append({"tag": t.tag, "count": t.count})
     return tags_map
+
+
+async def get_leaderboard_profiles(
+    db: AsyncSession,
+    role: str | None,
+    category: str | None,
+    limit: int,
+) -> list[Profile]:
+    filters = [
+        Profile.is_opted_out.is_(False),
+        Profile.handle.isnot(None),
+        Profile.trust_score.isnot(None),
+    ]
+    if role:
+        filters.append(Profile.profile_type == role)
+    if category and category != "all":
+        filters.append(Profile.category == category)
+
+    result = await db.execute(
+        select(Profile)
+        .options(selectinload(Profile.organization))
+        .where(*filters)
+        .order_by(Profile.trust_score.desc())
+        .limit(limit)
+    )
+    return result.scalars().all()
 
 
 async def get_profile_by_handle(db: AsyncSession, handle: str) -> Profile | None:

@@ -47,11 +47,12 @@ def build_profile_list_item(
         "review_count": profile.review_count,
         "avg_rating": safe_round(avg_rating),
         "verified": org.verification_status == "verified" if org else False,
-        "platforms": list({sa.platform for sa in sa_list}),
-        "primary_followers": max((primary_followers(sa.stats) for sa in sa_list), default=0),
+        "platforms": list({sa.platform for sa in sa_list}) if profile.profile_type == "creator" else [],
+        "primary_followers": max((primary_followers(sa.stats) for sa in sa_list), default=0) if profile.profile_type == "creator" else 0,
         "top_tags": top_tags,
         "is_claimed": profile.is_claimed,
         "access_level": profile.access_level,
+        "social_links": profile.social_links or [],
     }
 
 
@@ -79,11 +80,11 @@ def build_profile_detail(
         "is_claimed": profile.is_claimed,
         "access_level": profile.access_level,
         "org_id": str(org.id) if org else None,
-        "platforms": list({sa.platform for sa in social_accounts}),
+        "platforms": list({sa.platform for sa in social_accounts}) if profile.profile_type == "creator" else [],
         "primary_followers": max(
             (primary_followers(sa.stats) for sa in social_accounts), default=0
-        ),
-        "social_accounts": [serialize_social_account(sa) for sa in social_accounts],
+        ) if profile.profile_type == "creator" else 0,
+        "social_accounts": [serialize_social_account(sa) for sa in social_accounts] if profile.profile_type == "creator" else [],
         "badges": [
             {
                 "badge_type": b.badge_type,
@@ -95,12 +96,34 @@ def build_profile_detail(
             for b in profile.badges
         ],
         "top_tags": top_tags,
+        "social_links": profile.social_links or [],
+        "website": (org.verification_docs or {}).get("website") if org else None,
         "stats_breakdown": {
             "avg_communication":   safe_round(rating_row.avg_communication),
             "avg_professionalism": safe_round(rating_row.avg_professionalism),
             "avg_quality":         safe_round(rating_row.avg_quality),
             "avg_reliability":     safe_round(rating_row.avg_reliability),
         },
+    }
+
+
+def build_leaderboard_item(
+    profile: Profile,
+    org,
+    sa_list: list[SocialAccount],
+) -> dict:
+    return {
+        "handle": profile.handle,
+        "display_name": profile.display_name,
+        "profile_type": profile.profile_type,
+        "avatar_url": profile.avatar_url,
+        "trust_score": profile.trust_score,
+        "verified": org.verification_status == "verified" if org else False,
+        "platforms": list({sa.platform for sa in sa_list}) if profile.profile_type == "creator" else [],
+        "primary_followers": max(
+            (primary_followers(sa.stats) for sa in sa_list), default=0
+        ) if profile.profile_type == "creator" else 0,
+        "category": profile.category,
     }
 
 

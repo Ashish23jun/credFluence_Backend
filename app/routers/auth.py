@@ -13,7 +13,7 @@ from app.core.security import (
     verify_password,
 )
 from app.models.user import User
-from app.repositories.user_repo import get_user_by_email, get_user_by_id, get_user_with_org_and_memberships
+from app.repositories.user_repo import get_user_by_email, get_user_with_org_and_memberships
 from app.schemas.auth import LoginRequest, RefreshRequest, RegisterRequest, VerifyEmailRequest
 from app.services.otp_service import (
     delete_otp,
@@ -198,9 +198,12 @@ async def refresh_token(payload: RefreshRequest, db: AsyncSession = Depends(get_
     if token_data.get("type") != "refresh":
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token type")
 
-    user = await get_user_by_id(db, token_data.get("sub"))
+    user = await get_user_with_org_and_memberships(db, token_data.get("sub"))
     if not user or not user.is_active:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found or deactivated")
+
+    org = user.organization
+    membership = next((m for m in user.memberships if m.organization_id == org.id), None) if org else None
 
     return {
         "success": True,
@@ -209,5 +212,20 @@ async def refresh_token(payload: RefreshRequest, db: AsyncSession = Depends(get_
             "access_token": create_access_token({"sub": str(user.id), "role": user.role}),
             "token_type": "bearer",
             "expires_in": 1800,
+            "user": {
+                "id": str(user.id),
+                "email": user.email,
+                "role": user.role,
+                "onboarding_completed_at": user.onboarding_completed_at.isoformat() if user.onboarding_completed_at else None,
+                "org": {
+                    "id": str(org.id),
+                    "name": org.name,
+                    "slug": org.slug,
+                    "org_type": org.org_type,
+                    "verification_status": org.verification_status,
+                    "is_personal_creator_org": org.is_personal_creator_org,
+                    "membership_role": membership.role if membership else None,
+                } if org else None,
+            },
         },
     }

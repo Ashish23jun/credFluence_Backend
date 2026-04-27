@@ -2,7 +2,7 @@ import uuid
 from datetime import UTC, datetime
 
 from sqlalchemy import Boolean, DateTime, Enum, ForeignKey, Integer, String, Text
-from sqlalchemy.dialects.postgresql import JSONB, UUID
+from sqlalchemy.dialects.postgresql import JSONB, TSVECTOR, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.database import Base
@@ -51,6 +51,9 @@ class Profile(Base):
     # AI-generated summary tags
     ai_summary_tags: Mapped[list | None] = mapped_column(JSONB, nullable=True)
 
+    # Social/web links for agencies and brands (website, linkedin, instagram, etc.)
+    social_links: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+
     # Claim status
     is_claimed: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     is_dummy: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
@@ -65,8 +68,8 @@ class Profile(Base):
         nullable=False,
     )
 
-    # Search vector (populated by trigger/migration)
-    # search_vector is managed by PostgreSQL tsvector — added in migration
+    # Populated by DB trigger on INSERT/UPDATE — never set by app code
+    search_vector: Mapped[str | None] = mapped_column(TSVECTOR, nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(UTC), nullable=False

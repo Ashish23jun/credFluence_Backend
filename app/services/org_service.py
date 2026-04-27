@@ -52,7 +52,7 @@ async def resolve_org_for_signup(
     """
     if user.role == "creator":
         return await _create_creator_org(db, user, display_name)
-    return await _resolve_business_org(db, user, display_name)
+    return await _resolve_business_org(db, user)
 
 
 async def _create_creator_org(
@@ -105,7 +105,6 @@ async def _create_creator_org(
 async def _resolve_business_org(
     db: AsyncSession,
     user: User,
-    display_name: str,
 ) -> tuple[Organization, OrganizationMembership]:
     """
     Agency/brand: match by email domain.
@@ -140,8 +139,10 @@ async def _resolve_business_org(
         db.add(membership)
         return org, membership
 
-    # First user on this domain — create org
-    org_name = display_name or domain.split(".")[0].title()
+    # First user on this domain — create org.
+    # Always derive the placeholder name from the domain, never from the user's
+    # personal name. The admin sets the real company name in onboarding step 1.
+    org_name = domain.split(".")[0].title()
     base_slug = _slugify(org_name) or _slugify(domain.split(".")[0])
     slug = await _unique_slug(db, base_slug)
 
