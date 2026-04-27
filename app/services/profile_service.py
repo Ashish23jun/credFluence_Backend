@@ -26,6 +26,22 @@ def serialize_social_account(sa: SocialAccount) -> dict:
     }
 
 
+def _creator_platforms(profile: Profile, sa_list: list) -> list:
+    if profile.profile_type != "creator":
+        return []
+    if sa_list:
+        return list({sa.platform for sa in sa_list})
+    return [lnk["platform"] for lnk in (profile.social_links or []) if lnk.get("followers", 0) > 0]
+
+
+def _creator_followers(profile: Profile, sa_list: list) -> int:
+    if profile.profile_type != "creator":
+        return 0
+    if sa_list:
+        return max((primary_followers(sa.stats) for sa in sa_list), default=0)
+    return max((lnk.get("followers", 0) for lnk in (profile.social_links or [])), default=0)
+
+
 def build_profile_list_item(
     profile: Profile,
     org,
@@ -47,8 +63,8 @@ def build_profile_list_item(
         "review_count": profile.review_count,
         "avg_rating": safe_round(avg_rating),
         "verified": org.verification_status == "verified" if org else False,
-        "platforms": list({sa.platform for sa in sa_list}) if profile.profile_type == "creator" else [],
-        "primary_followers": max((primary_followers(sa.stats) for sa in sa_list), default=0) if profile.profile_type == "creator" else 0,
+        "platforms": _creator_platforms(profile, sa_list),
+        "primary_followers": _creator_followers(profile, sa_list),
         "top_tags": top_tags,
         "is_claimed": profile.is_claimed,
         "access_level": profile.access_level,
@@ -80,10 +96,8 @@ def build_profile_detail(
         "is_claimed": profile.is_claimed,
         "access_level": profile.access_level,
         "org_id": str(org.id) if org else None,
-        "platforms": list({sa.platform for sa in social_accounts}) if profile.profile_type == "creator" else [],
-        "primary_followers": max(
-            (primary_followers(sa.stats) for sa in social_accounts), default=0
-        ) if profile.profile_type == "creator" else 0,
+        "platforms": _creator_platforms(profile, social_accounts),
+        "primary_followers": _creator_followers(profile, social_accounts),
         "social_accounts": [serialize_social_account(sa) for sa in social_accounts] if profile.profile_type == "creator" else [],
         "badges": [
             {
@@ -119,10 +133,8 @@ def build_leaderboard_item(
         "avatar_url": profile.avatar_url,
         "trust_score": profile.trust_score,
         "verified": org.verification_status == "verified" if org else False,
-        "platforms": list({sa.platform for sa in sa_list}) if profile.profile_type == "creator" else [],
-        "primary_followers": max(
-            (primary_followers(sa.stats) for sa in sa_list), default=0
-        ) if profile.profile_type == "creator" else 0,
+        "platforms": _creator_platforms(profile, sa_list),
+        "primary_followers": _creator_followers(profile, sa_list),
         "category": profile.category,
     }
 
