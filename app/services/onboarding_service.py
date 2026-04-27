@@ -28,6 +28,10 @@ def build_onboarding_context(user, org, profile, membership, social_accounts: li
             "avatar_url": profile.avatar_url if profile else None,
             "trust_score": profile.trust_score if profile else None,
             "access_level": profile.access_level if profile else None,
+            "languages": profile.languages if profile else None,
+            "niches": profile.niches if profile else None,
+            "social_links": profile.social_links if profile else None,
+            "handle": profile.handle if profile else None,
         } if profile else None,
         "membership": {
             "role": membership.role,

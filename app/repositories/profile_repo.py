@@ -126,7 +126,12 @@ async def get_leaderboard_profiles(
         select(Profile)
         .options(selectinload(Profile.organization))
         .where(*filters)
-        .order_by(Profile.trust_score.desc())
+        .order_by(text("""
+            (SELECT (elem->>'followers')::bigint
+             FROM jsonb_array_elements(social_links) elem
+             WHERE elem->>'platform' = 'instagram'
+             LIMIT 1) DESC NULLS LAST
+        """))
         .limit(limit)
     )
     return result.scalars().all()

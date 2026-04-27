@@ -8,6 +8,7 @@ GET /profiles/{handle}/reviews   — paginated reviews for a profile
 """
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.cache import cache_get, cache_set
@@ -23,7 +24,15 @@ router = APIRouter(prefix="/profiles", tags=["profiles"])
 _LEADERBOARD_TTL = 300  # 5 minutes
 
 _VALID_KINDS = ("creator", "agency", "brand")
-_VALID_SORTS = ("trust_desc", "trust_asc", "review_count", "newest")
+_VALID_SORTS = ("trust_desc", "trust_asc", "review_count", "newest", "followers_desc")
+
+# Extracts Instagram followers from social_links JSONB for sorting
+_IG_FOLLOWERS_SORT = text("""
+    (SELECT (elem->>'followers')::bigint
+     FROM jsonb_array_elements(social_links) elem
+     WHERE elem->>'platform' = 'instagram'
+     LIMIT 1) DESC NULLS LAST
+""")
 _PUBLIC_STATUSES = ("verified", "in_dispute_window", "disputed")
 
 
@@ -58,10 +67,11 @@ async def list_profiles(
         filters.append(Profile.category == category)
 
     order_col = {
-        "trust_desc":   Profile.trust_score.desc(),
-        "trust_asc":    Profile.trust_score.asc(),
-        "review_count": Profile.review_count.desc(),
-        "newest":       Profile.created_at.desc(),
+        "trust_desc":    Profile.trust_score.desc(),
+        "trust_asc":     Profile.trust_score.asc(),
+        "review_count":  Profile.review_count.desc(),
+        "newest":        Profile.created_at.desc(),
+        "followers_desc": _IG_FOLLOWERS_SORT,
     }[sort]
 
     total = await profile_repo.count_profiles(db, filters, search_query=search_query)

@@ -26,12 +26,17 @@ def serialize_social_account(sa: SocialAccount) -> dict:
     }
 
 
+def _ig_link(profile: Profile) -> dict | None:
+    return next((l for l in (profile.social_links or []) if l.get("platform") == "instagram"), None)
+
+
 def _creator_platforms(profile: Profile, sa_list: list) -> list:
     if profile.profile_type != "creator":
         return []
     if sa_list:
         return list({sa.platform for sa in sa_list})
-    return [lnk["platform"] for lnk in (profile.social_links or []) if lnk.get("followers", 0) > 0]
+    ig = _ig_link(profile)
+    return ["instagram"] if ig and ig.get("followers", 0) > 0 else []
 
 
 def _creator_followers(profile: Profile, sa_list: list) -> int:
@@ -39,7 +44,8 @@ def _creator_followers(profile: Profile, sa_list: list) -> int:
         return 0
     if sa_list:
         return max((primary_followers(sa.stats) for sa in sa_list), default=0)
-    return max((lnk.get("followers", 0) for lnk in (profile.social_links or [])), default=0)
+    ig = _ig_link(profile)
+    return ig.get("followers", 0) if ig else 0
 
 
 def build_profile_list_item(
