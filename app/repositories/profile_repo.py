@@ -1,3 +1,5 @@
+import re
+
 from sqlalchemy import Float, cast, func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -7,24 +9,56 @@ from app.models.review import Review
 from app.models.tag_aggregation import TagAggregation
 
 _PUBLIC_STATUSES = ("verified", "in_dispute_window", "disputed")
-_TRGM_THRESHOLD = 0.2  # word_similarity score floor for fuzzy match
+_TRGM_SINGLE_THRESHOLD = 0.35  # word_similarity floor for single-word typo tolerance
+
+
+def _prefix_tsquery(q: str):
+    """
+    Build a prefix-aware tsquery: all words exact AND last word with :* suffix.
+    'elvish yad' → to_tsquery('simple', 'elvish & yad:*')
+    This handles partial typing — 'yad' matches 'yadav' in the index.
+    """
+    words = [re.sub(r"[^\w]", "", w) for w in q.strip().split()]
+    words = [w for w in words if w]
+    if not words:
+        return None
+    terms = [f"{w}" for w in words[:-1]] + [f"{words[-1]}:*"]
+    return func.to_tsquery("simple", " & ".join(terms))
 
 
 def _search_filter(q: str):
-    """Return an OR filter covering tsvector FTS + trigram fuzzy on name/handle."""
-    tsq = func.websearch_to_tsquery("simple", q)
-    return or_(
-        Profile.search_vector.op("@@")(tsq),
-        func.word_similarity(q, Profile.display_name) > _TRGM_THRESHOLD,
-        func.word_similarity(q, Profile.handle) > _TRGM_THRESHOLD,
-        Profile.display_name.ilike(f"%{q}%"),
-        Profile.handle.ilike(f"%{q}%"),
-    )
+    """
+    Multi-word: prefix tsquery (last word gets :*) + exact phrase ilike.
+    Single-word: prefix tsquery + trgm word_similarity for typo tolerance.
+    No bare word_similarity on multi-word queries — shares a single surname
+    (e.g. "Yadav") would flood results with false positives.
+    """
+    words = [w for w in q.strip().split() if w]
+    prefix_tsq = _prefix_tsquery(q)
+
+    base = []
+    if prefix_tsq is not None:
+        base.append(Profile.search_vector.op("@@")(prefix_tsq))
+
+    if len(words) == 1:
+        base += [
+            func.word_similarity(q, Profile.display_name) > _TRGM_SINGLE_THRESHOLD,
+            func.word_similarity(q, Profile.handle) > _TRGM_SINGLE_THRESHOLD,
+        ]
+    else:
+        base += [
+            Profile.display_name.ilike(f"%{q}%"),
+            Profile.handle.ilike(f"%{q}%"),
+        ]
+
+    return or_(*base)
 
 
 def _search_order(q: str):
     """Rank by ts_rank_cd (cover density, length-normalised) then trust_score."""
-    tsq = func.websearch_to_tsquery("simple", q)
+    # Use prefix tsquery for ranking too so partial words score correctly
+    prefix_tsq = _prefix_tsquery(q)
+    tsq = prefix_tsq if prefix_tsq is not None else func.websearch_to_tsquery("simple", q)
     rank = func.ts_rank_cd(Profile.search_vector, tsq, 32)
     trgm = func.greatest(
         func.word_similarity(q, Profile.display_name),
