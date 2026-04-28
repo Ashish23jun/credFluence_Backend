@@ -38,8 +38,8 @@ class Profile(Base):
     )
     category: Mapped[str | None] = mapped_column(String(100), nullable=True, index=True)
 
-    # Trust score (300–900); default 450, updated after verification
-    trust_score: Mapped[int] = mapped_column(Integer, default=450, nullable=False)
+    # Trust score (30–90); default 45, updated after verification
+    trust_score: Mapped[int] = mapped_column(Integer, default=45, nullable=False)
     review_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
 
     # Niches / content verticals (array of strings e.g. ["fashion", "lifestyle"])

@@ -84,7 +84,7 @@ async def _create_creator_org(
         organization_id=org.id,
         display_name=display_name,
         profile_type="creator",
-        trust_score=450,
+        trust_score=45,
         is_claimed=True,
         access_level="limited",
     )
@@ -169,7 +169,7 @@ async def _resolve_business_org(
         organization_id=org.id,
         display_name=org_name,
         profile_type=user.role,
-        trust_score=450,
+        trust_score=45,
         is_claimed=True,
         access_level="limited",
     )
