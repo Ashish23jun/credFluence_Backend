@@ -36,6 +36,9 @@ dependencies = [
     # Storage (S3-compatible / MinIO)
     "boto3>=1.34.0",
 
+    # AI / OCR (Claude vision for evidence extraction)
+    "anthropic>=0.40.0",
+
     # Email
     "aiosmtplib>=3.0.0",
     "sendgrid>=6.11.0",

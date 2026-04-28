@@ -1,7 +1,7 @@
 import uuid
 from datetime import UTC, datetime
 
-from sqlalchemy import DateTime, Enum, ForeignKey, String, Text
+from sqlalchemy import CheckConstraint, DateTime, Enum, ForeignKey, String, Text
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -10,6 +10,12 @@ from app.core.database import Base
 
 class Dispute(Base):
     __tablename__ = "disputes"
+    __table_args__ = (
+        CheckConstraint(
+            "outcome IN ('reviewer_won','target_won','mutual_resolution')",
+            name="ck_disputes_outcome",
+        ),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
@@ -38,6 +44,8 @@ class Dispute(Base):
         nullable=False,
         index=True,
     )
+
+    outcome: Mapped[str | None] = mapped_column(String(30), nullable=True)
 
     resolved_by_admin_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), nullable=True

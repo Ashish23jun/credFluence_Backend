@@ -1,11 +1,11 @@
 import re
 
-from sqlalchemy import Float, cast, func, or_, select, text
+from sqlalchemy import Float, case, cast, func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.models.profile import Profile
-from app.models.review import Review
+from app.models.review import Review, ReviewRating
 from app.models.tag_aggregation import TagAggregation
 
 _PUBLIC_STATUSES = ("verified", "in_dispute_window", "disputed")
@@ -108,11 +108,10 @@ async def get_avg_ratings_for_profiles(
     rows = (await db.execute(
         select(
             Review.target_profile_id,
-            func.avg(
-                (Review.rating_communication + Review.rating_professionalism +
-                 Review.rating_quality + Review.rating_reliability) / 4.0
-            ).label("avg_rating"),
+            func.avg(cast(ReviewRating.score, Float)).label("avg_rating"),
         )
+        .select_from(Review)
+        .join(ReviewRating, ReviewRating.review_id == Review.id)
         .where(
             Review.target_profile_id.in_(profile_ids),
             Review.status.in_(_PUBLIC_STATUSES),
@@ -194,17 +193,17 @@ async def get_profile_id_by_handle(db: AsyncSession, handle: str):
 
 
 async def get_single_profile_ratings(db: AsyncSession, profile_id):
+    score = cast(ReviewRating.score, Float)
     return (await db.execute(
         select(
-            func.avg(Review.rating_communication).label("avg_communication"),
-            func.avg(Review.rating_professionalism).label("avg_professionalism"),
-            func.avg(Review.rating_quality).label("avg_quality"),
-            func.avg(Review.rating_reliability).label("avg_reliability"),
-            func.avg(
-                (Review.rating_communication + Review.rating_professionalism +
-                 Review.rating_quality + Review.rating_reliability) / 4.0
-            ).label("avg_rating"),
+            func.avg(case((ReviewRating.category == "communication",   score))).label("avg_communication"),
+            func.avg(case((ReviewRating.category == "professionalism", score))).label("avg_professionalism"),
+            func.avg(case((ReviewRating.category == "quality",         score))).label("avg_quality"),
+            func.avg(case((ReviewRating.category == "reliability",     score))).label("avg_reliability"),
+            func.avg(score).label("avg_rating"),
         )
+        .select_from(Review)
+        .join(ReviewRating, ReviewRating.review_id == Review.id)
         .where(
             Review.target_profile_id == profile_id,
             Review.status.in_(_PUBLIC_STATUSES),
@@ -222,7 +221,12 @@ async def get_reviews_page(
     from sqlalchemy.orm import selectinload as _si
     result = await db.execute(
         select(Review)
-        .options(_si(Review.reviewer).selectinload(User.organization))
+        .options(
+            _si(Review.reviewer).selectinload(User.organization),
+            _si(Review.ratings),
+            _si(Review.payments),
+            _si(Review.tags),
+        )
         .where(*filters)
         .order_by(Review.created_at.desc())
         .offset(offset)

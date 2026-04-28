@@ -147,20 +147,28 @@ def build_leaderboard_item(
 
 def build_review_item(review) -> dict:
     reviewer_org = review.reviewer.organization if review.reviewer else None
-    avg = (
-        review.rating_communication + review.rating_professionalism +
-        review.rating_quality + review.rating_reliability
-    ) / 4.0
+    scores = [r.score for r in review.ratings] if review.ratings else []
+    avg = round(sum(scores) / len(scores), 2) if scores else None
     return {
         "id": str(review.id),
         "relationship_type": review.relationship_type,
-        "payment_status": review.payment_status,
-        "rating_communication": review.rating_communication,
-        "rating_professionalism": review.rating_professionalism,
-        "rating_quality": review.rating_quality,
-        "rating_reliability": review.rating_reliability,
-        "avg_rating": round(avg, 2),
-        "tags": review.tags or [],
+        "body": review.body,
+        "avg_rating": avg,
+        "ratings": [
+            {"category": r.category, "score": r.score}
+            for r in (review.ratings or [])
+        ],
+        "payments": [
+            {
+                "payment_type": p.payment_type,
+                "amount": p.amount,          # paise
+                "currency": p.currency,
+                "status": p.status,
+                "paid_at": p.paid_at.isoformat() if p.paid_at else None,
+            }
+            for p in (review.payments or [])
+        ],
+        "tags": [t.tag for t in (review.tags or [])],
         "status": review.status,
         "created_at": review.created_at.isoformat(),
         "reviewer": {
