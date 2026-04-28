@@ -1,9 +1,12 @@
 from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, HTTPException, status
+from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.cache import cache_delete, user_key
 from app.core.database import get_db
+from app.core.dependencies import get_current_user
 from app.core.email import send_otp_email
 from app.core.security import (
     create_access_token,
@@ -27,6 +30,31 @@ from app.services.otp_service import (
 from app.services.org_service import resolve_org_for_signup
 
 router = APIRouter(prefix="/auth", tags=["auth"])
+
+
+def _user_dict(user: User, org=None, membership=None) -> dict:
+    return {
+        "id": str(user.id),
+        "email": user.email,
+        "full_name": user.full_name,
+        "role": user.role,
+        "is_verified": user.is_verified,
+        "subscription_tier": user.subscription_tier,
+        "onboarding_completed_at": (
+            user.onboarding_completed_at.isoformat()
+            if user.onboarding_completed_at else None
+        ),
+        "org": {
+            "id": str(org.id),
+            "name": org.name,
+            "slug": org.slug,
+            "org_type": org.org_type,
+            "verification_status": org.verification_status,
+            "is_personal_creator_org": org.is_personal_creator_org,
+            "membership_status": membership.status if membership else None,
+            "membership_role": membership.role if membership else None,
+        } if org else None,
+    }
 
 
 @router.post("/register", response_model=dict, status_code=status.HTTP_201_CREATED)
@@ -90,24 +118,7 @@ async def verify_email(payload: VerifyEmailRequest, db: AsyncSession = Depends(g
         "success": True,
         "message": "Email verified. Account created successfully.",
         "data": {
-            "user": {
-                "id": str(user.id),
-                "email": user.email,
-                "role": user.role,
-                "is_verified": user.is_verified,
-                "subscription_tier": user.subscription_tier,
-                "onboarding_completed_at": None,
-                "org": {
-                    "id": str(org.id),
-                    "name": org.name,
-                    "slug": org.slug,
-                    "org_type": org.org_type,
-                    "verification_status": org.verification_status,
-                    "is_personal_creator_org": org.is_personal_creator_org,
-                    "membership_status": membership.status,
-                    "membership_role": membership.role,
-                },
-            },
+            "user": _user_dict(user, org, membership),
             "access_token": access_token,
             "refresh_token": refresh_token,
             "token_type": "bearer",
@@ -159,27 +170,7 @@ async def login(payload: LoginRequest, db: AsyncSession = Depends(get_db)) -> di
         "success": True,
         "message": "Login successful",
         "data": {
-            "user": {
-                "id": str(user.id),
-                "email": user.email,
-                "role": user.role,
-                "is_verified": user.is_verified,
-                "subscription_tier": user.subscription_tier,
-                "onboarding_completed_at": (
-                    user.onboarding_completed_at.isoformat()
-                    if user.onboarding_completed_at else None
-                ),
-                "org": {
-                    "id": str(org.id),
-                    "name": org.name,
-                    "slug": org.slug,
-                    "org_type": org.org_type,
-                    "verification_status": org.verification_status,
-                    "is_personal_creator_org": org.is_personal_creator_org,
-                    "membership_status": membership.status if membership else None,
-                    "membership_role": membership.role if membership else None,
-                } if org else None,
-            },
+            "user": _user_dict(user, org, membership),
             "access_token": access_token,
             "refresh_token": refresh_token,
             "token_type": "bearer",
@@ -212,20 +203,44 @@ async def refresh_token(payload: RefreshRequest, db: AsyncSession = Depends(get_
             "access_token": create_access_token({"sub": str(user.id), "role": user.role}),
             "token_type": "bearer",
             "expires_in": 1800,
-            "user": {
-                "id": str(user.id),
-                "email": user.email,
-                "role": user.role,
-                "onboarding_completed_at": user.onboarding_completed_at.isoformat() if user.onboarding_completed_at else None,
-                "org": {
-                    "id": str(org.id),
-                    "name": org.name,
-                    "slug": org.slug,
-                    "org_type": org.org_type,
-                    "verification_status": org.verification_status,
-                    "is_personal_creator_org": org.is_personal_creator_org,
-                    "membership_role": membership.role if membership else None,
-                } if org else None,
-            },
+            "user": _user_dict(user, org, membership),
         },
     }
+
+
+class UpdateMePayload(BaseModel):
+    full_name: str | None = None
+
+
+@router.get("/me", response_model=dict)
+async def get_me(
+    current_user: dict = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    user = await get_user_with_org_and_memberships(db, current_user["id"])
+    if not user:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+    org = user.organization
+    membership = next((m for m in user.memberships if m.organization_id == org.id), None) if org else None
+    return {"success": True, "message": "OK", "data": _user_dict(user, org, membership)}
+
+
+@router.patch("/me", response_model=dict)
+async def update_me(
+    payload: UpdateMePayload,
+    current_user: dict = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    user = await get_user_with_org_and_memberships(db, current_user["id"])
+    if not user:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+
+    if payload.full_name is not None:
+        user.full_name = payload.full_name.strip() or None
+
+    await db.commit()
+    await cache_delete(user_key(str(user.id)))
+
+    org = user.organization
+    membership = next((m for m in user.memberships if m.organization_id == org.id), None) if org else None
+    return {"success": True, "message": "Profile updated.", "data": _user_dict(user, org, membership)}
