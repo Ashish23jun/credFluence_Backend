@@ -7,6 +7,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
 from app.core.dependencies import get_current_user
+from app.models.organization import Organization
+from app.models.profile import Profile
 from app.models.review import Review, ReviewEvidence, ReviewFlag, ReviewPayment, ReviewRating, ReviewTag
 from app.repositories.profile_repo import get_profile_by_handle
 from app.services.storage_service import presign_put
@@ -18,13 +20,23 @@ _ALLOWED_MIME = {
     "application/pdf",
 }
 _EVIDENCE_TYPES = {"screenshot", "email", "contract", "invoice", "chat"}
+_VALID_KINDS = {"creator", "agency", "brand"}
 
 _VALID_RELATIONSHIPS = {
-    "brand":   {"creator": "brand_worked_with_creator"},
-    "agency":  {"creator": "agency_worked_with_creator"},
+    "brand": {
+        "creator": "brand_worked_with_creator",
+        "agency":  "brand_worked_with_agency",
+        # brand → brand: not allowed
+    },
+    "agency": {
+        "creator": "agency_worked_with_creator",
+        "brand":   "agency_worked_with_brand",
+        "agency":  "agency_worked_with_agency",
+    },
     "creator": {
-        "brand":  "creator_worked_with_brand",
-        "agency": "creator_worked_with_agency",
+        "brand":   "creator_worked_with_brand",
+        "agency":  "creator_worked_with_agency",
+        "creator": "creator_worked_with_creator",
     },
 }
 
@@ -62,8 +74,20 @@ class EvidenceIn(BaseModel):
     file_key: str
 
 
+class OffPlatformTarget(BaseModel):
+    name: str
+    email: str
+    kind: str           # creator | agency | brand
+    youtube_url: str | None = None
+    instagram_handle: str | None = None
+    linkedin_url: str | None = None
+
+
 class SubmitReviewRequest(BaseModel):
-    target_profile_handle: str
+    # Exactly one of these must be set
+    target_profile_handle: str | None = None
+    off_platform: OffPlatformTarget | None = None
+
     body: str | None = None
     total_deal_value: int | None = None
     currency: str = "INR"
@@ -115,30 +139,75 @@ async def submit_review(
     db: AsyncSession = Depends(get_db),
     current_user: dict = Depends(get_current_user),
 ) -> dict:
-    # Resolve target profile
-    target = await get_profile_by_handle(db, payload.target_profile_handle)
-    if not target:
-        raise HTTPException(status_code=404, detail="Profile not found")
+    # Validate: exactly one target source
+    if not payload.target_profile_handle and not payload.off_platform:
+        raise HTTPException(status_code=422, detail="Provide target_profile_handle or off_platform")
+    if payload.target_profile_handle and payload.off_platform:
+        raise HTTPException(status_code=422, detail="Provide only one of target_profile_handle or off_platform")
 
-    # Derive relationship type from reviewer role + target profile type
     reviewer_role = current_user["role"]
-    rel_map = _VALID_RELATIONSHIPS.get(reviewer_role, {})
-    relationship_type = rel_map.get(target.profile_type)
-    if not relationship_type:
-        raise HTTPException(
-            status_code=422,
-            detail=f"A {reviewer_role} cannot review a {target.profile_type}",
-        )
-
-    # Prevent self-review
     reviewer_org_id = current_user["org"]["id"]
-    if str(target.organization_id) == str(reviewer_org_id):
-        raise HTTPException(status_code=422, detail="Cannot review your own profile")
+
+    if payload.target_profile_handle:
+        # ── On-platform path ──────────────────────────────────────────────
+        target = await get_profile_by_handle(db, payload.target_profile_handle)
+        if not target:
+            raise HTTPException(status_code=404, detail="Profile not found")
+
+        target_kind = target.profile_type
+
+        rel_map = _VALID_RELATIONSHIPS.get(reviewer_role, {})
+        relationship_type = rel_map.get(target_kind)
+        if not relationship_type:
+            raise HTTPException(
+                status_code=422,
+                detail=f"A {reviewer_role} cannot review a {target_kind}",
+            )
+
+        if str(target.organization_id) == str(reviewer_org_id):
+            raise HTTPException(status_code=422, detail="Cannot review your own profile")
+
+        target_profile_id = target.id
+
+    else:
+        # ── Off-platform path ─────────────────────────────────────────────
+        op = payload.off_platform
+        if op.kind not in _VALID_KINDS:
+            raise HTTPException(status_code=422, detail=f"Invalid kind: {op.kind}")
+
+        rel_map = _VALID_RELATIONSHIPS.get(reviewer_role, {})
+        relationship_type = rel_map.get(op.kind)
+        if not relationship_type:
+            raise HTTPException(
+                status_code=422,
+                detail=f"A {reviewer_role} cannot review a {op.kind}",
+            )
+
+        # Create dummy org + profile in this transaction
+        slug = f"dummy-{uuid.uuid4().hex[:12]}"
+        dummy_org = Organization(
+            name=op.name.strip(),
+            slug=slug,
+            org_type=op.kind,
+            verification_status="pending",
+        )
+        db.add(dummy_org)
+        await db.flush()  # get dummy_org.id
+
+        dummy_profile = Profile(
+            organization_id=dummy_org.id,
+            profile_type=op.kind,
+            is_dummy=True,
+        )
+        db.add(dummy_profile)
+        await db.flush()  # get dummy_profile.id
+
+        target_profile_id = dummy_profile.id
 
     # Build Review
     review = Review(
         reviewer_id=uuid.UUID(current_user["id"]),
-        target_profile_id=target.id,
+        target_profile_id=target_profile_id,
         relationship_type=relationship_type,
         body=payload.body or None,
         contact_email=payload.contact_email.strip(),
@@ -146,7 +215,7 @@ async def submit_review(
         total_deal_value=payload.total_deal_value,
         currency=payload.currency,
         status="in_dispute_window",
-        dispute_window_expires_at=datetime.now(UTC) + timedelta(hours=72),
+        dispute_window_expires_at=datetime.now(UTC) + timedelta(hours=48),
     )
     db.add(review)
     await db.flush()  # get review.id
@@ -224,7 +293,7 @@ async def submit_review(
 
     return {
         "success": True,
-        "message": "Review submitted. It will go live after the 72-hour dispute window.",
+        "message": "Review submitted. It will go live after the 48-hour dispute window.",
         "data": {
             "id": str(review.id),
             "status": review.status,

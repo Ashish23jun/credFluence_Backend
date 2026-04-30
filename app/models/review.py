@@ -50,9 +50,13 @@ class Review(Base):
     relationship_type: Mapped[str] = mapped_column(
         Enum(
             "brand_worked_with_creator",
+            "brand_worked_with_agency",
             "agency_worked_with_creator",
+            "agency_worked_with_brand",
+            "agency_worked_with_agency",
             "creator_worked_with_brand",
             "creator_worked_with_agency",
+            "creator_worked_with_creator",
             name="relationship_type",
         ),
         nullable=False,
