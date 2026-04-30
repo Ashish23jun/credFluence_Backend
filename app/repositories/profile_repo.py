@@ -8,7 +8,7 @@ from app.models.profile import Profile
 from app.models.review import Review, ReviewRating
 from app.models.tag_aggregation import TagAggregation
 
-_PUBLIC_STATUSES = ("verified", "in_dispute_window", "disputed")
+_PUBLIC_STATUSES = ("verified",)
 _TRGM_SINGLE_THRESHOLD = 0.35  # word_similarity floor for single-word typo tolerance
 
 

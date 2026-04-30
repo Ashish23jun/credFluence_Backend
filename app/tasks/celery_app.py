@@ -7,7 +7,7 @@ celery_app = Celery(
     broker=settings.redis_url,
     backend=settings.redis_url,
     include=[
-        "app.tasks.notifications",
+        "app.tasks.review_notifications",
         "app.tasks.score",
         "app.tasks.ai",
         "app.tasks.badges",

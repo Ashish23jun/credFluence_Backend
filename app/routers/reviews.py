@@ -168,6 +168,7 @@ async def submit_review(
             raise HTTPException(status_code=422, detail="Cannot review your own profile")
 
         target_profile_id = target.id
+        is_off_platform = False
 
     else:
         # ── Off-platform path ─────────────────────────────────────────────
@@ -203,8 +204,14 @@ async def submit_review(
         await db.flush()  # get dummy_profile.id
 
         target_profile_id = dummy_profile.id
+        is_off_platform = True
 
     # Build Review
+    # Off-platform: dispute window does NOT start until the target claims their profile.
+    # On-platform: 48hr window starts immediately.
+    dispute_window_expires_at = (
+        None if is_off_platform else datetime.now(UTC) + timedelta(hours=48)
+    )
     review = Review(
         reviewer_id=uuid.UUID(current_user["id"]),
         target_profile_id=target_profile_id,
@@ -215,7 +222,7 @@ async def submit_review(
         total_deal_value=payload.total_deal_value,
         currency=payload.currency,
         status="in_dispute_window",
-        dispute_window_expires_at=datetime.now(UTC) + timedelta(hours=48),
+        dispute_window_expires_at=dispute_window_expires_at,
     )
     db.add(review)
     await db.flush()  # get review.id
@@ -291,13 +298,25 @@ async def submit_review(
 
     await db.commit()
 
+    # Fire fanout: in-app notifications + email (+ WhatsApp later)
+    from app.tasks.review_notifications import notify_review_submitted
+    notify_review_submitted.delay(str(review.id))
+
+    success_message = (
+        "Review submitted. The 48-hour dispute window will start once the target claims their profile."
+        if is_off_platform
+        else "Review submitted. It will go live after the 48-hour dispute window."
+    )
     return {
         "success": True,
-        "message": "Review submitted. It will go live after the 48-hour dispute window.",
+        "message": success_message,
         "data": {
             "id": str(review.id),
             "status": review.status,
-            "dispute_window_expires_at": review.dispute_window_expires_at.isoformat(),
+            "dispute_window_expires_at": (
+                review.dispute_window_expires_at.isoformat()
+                if review.dispute_window_expires_at else None
+            ),
         },
     }
 

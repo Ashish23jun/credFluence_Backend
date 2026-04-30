@@ -13,7 +13,7 @@ async def get_review_by_id(db: AsyncSession, review_id) -> Review | None:
 
 async def create_dispute_with_recipient(
     db: AsyncSession,
-    review_id,
+    review: Review,
     filed_by_user_id,
     dispute_type: str,
     reason: str,
@@ -21,7 +21,7 @@ async def create_dispute_with_recipient(
     target_org_id=None,
 ) -> Dispute:
     dispute = Dispute(
-        review_id=review_id,
+        review_id=review.id,
         filed_by_user_id=filed_by_user_id,
         type=dispute_type,
         reason=reason,
@@ -35,6 +35,9 @@ async def create_dispute_with_recipient(
         recipient_type=recipient_type,
         recipient_org_id=target_org_id,
     ))
+
+    # Move the review out of the in_dispute_window so the Beat task does not auto-verify it
+    review.status = "disputed"
 
     await db.commit()
     await db.refresh(dispute)

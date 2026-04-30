@@ -48,7 +48,7 @@ async def create_dispute(
     recipient_type, recipient_org_id = route_dispute(payload.type, payload.target_org_id)
     dispute = await create_dispute_with_recipient(
         db,
-        review_id=review.id,
+        review=review,
         filed_by_user_id=current_user["id"],
         dispute_type=payload.type,
         reason=payload.reason,

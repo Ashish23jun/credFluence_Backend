@@ -76,18 +76,6 @@ services:
     restart: unless-stopped
 
   # ──────────────────────────────────────────────
-  # Mailpit (local email catcher — ARM64 native)
-  # ──────────────────────────────────────────────
-  mailhog:
-    image: axllent/mailpit:latest
-    ports:
-      - "1025:1025"    # SMTP
-      - "8025:8025"    # Web UI → open http://localhost:8025
-    networks:
-      - credfluence
-    restart: unless-stopped
-
-  # ──────────────────────────────────────────────
   # Celery Worker
   # ──────────────────────────────────────────────
   celery_worker:
@@ -101,6 +89,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+    volumes:
+      - ./app:/app/app
     command: celery -A app.tasks.celery_app worker --loglevel=info --concurrency=2
     networks:
       - credfluence
@@ -120,6 +110,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+    volumes:
+      - ./app:/app/app
     command: celery -A app.tasks.celery_app beat --loglevel=info
     networks:
       - credfluence

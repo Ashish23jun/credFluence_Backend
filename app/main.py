@@ -49,7 +49,7 @@ app.add_exception_handler(Exception, global_exception_handler)
 # ---------------------------------------------------------------------------
 # Routers
 # ---------------------------------------------------------------------------
-from app.routers import admin, admin_auth, auth, disputes, notifications, oauth, onboarding, profiles, reviews
+from app.routers import admin, admin_auth, auth, claim, disputes, notifications, oauth, onboarding, profiles, reviews
 
 app.include_router(auth.router)
 app.include_router(oauth.router)
@@ -57,6 +57,7 @@ app.include_router(onboarding.router)
 app.include_router(profiles.router)
 app.include_router(reviews.router)
 app.include_router(disputes.router)
+app.include_router(claim.router)
 app.include_router(admin_auth.router)
 app.include_router(admin.router)
 app.include_router(notifications.router)

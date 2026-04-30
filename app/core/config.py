@@ -36,11 +36,12 @@ class Settings(BaseSettings):
     # Phone encryption
     phone_encryption_key: str = "00" * 32
 
-    # Storage (AWS S3)
+    # Storage (AWS S3 / MinIO local)
     s3_access_key: str = ""
     s3_secret_key: str = ""
     s3_bucket_name: str = "credfluence"
     s3_region: str = "ap-south-1"
+    s3_endpoint_url: str | None = None  # set to MinIO URL for local dev
 
     # Email
     sendgrid_api_key: str = "SG.placeholder"
