@@ -145,10 +145,34 @@ def build_leaderboard_item(
     }
 
 
+def _reviewer_primary_social(social_accounts: list) -> dict:
+    """Pick the social account with the highest follower count."""
+    candidates = []
+    for acct in (social_accounts or []):
+        if not acct.username:
+            continue
+        stats = acct.stats or {}
+        if acct.platform == "instagram":
+            followers = int(stats.get("followers_count") or 0)
+            candidates.append((followers, "instagram", acct.username))
+        elif acct.platform == "youtube":
+            followers = int(stats.get("subscribers") or 0)
+            handle = stats.get("youtube_handle") or acct.username
+            candidates.append((followers, "youtube", handle))
+    if not candidates:
+        return {}
+    candidates.sort(key=lambda x: x[0], reverse=True)
+    followers, platform, handle = candidates[0]
+    return {"platform": platform, "handle": handle, "followers": followers}
+
+
 def build_review_item(review) -> dict:
     reviewer_org = review.reviewer.organization if review.reviewer else None
     scores = [r.score for r in review.ratings] if review.ratings else []
     avg = round(sum(scores) / len(scores), 2) if scores else None
+    social = _reviewer_primary_social(
+        getattr(review.reviewer, "social_accounts", []) or []
+    ) if review.reviewer else {}
     return {
         "id": str(review.id),
         "relationship_type": review.relationship_type,
@@ -158,16 +182,6 @@ def build_review_item(review) -> dict:
             {"category": r.category, "score": r.score}
             for r in (review.ratings or [])
         ],
-        "payments": [
-            {
-                "payment_type": p.payment_type,
-                "amount": p.amount,          # paise
-                "currency": p.currency,
-                "status": p.status,
-                "paid_at": p.paid_at.isoformat() if p.paid_at else None,
-            }
-            for p in (review.payments or [])
-        ],
         "tags": [t.tag for t in (review.tags or [])],
         "status": review.status,
         "created_at": review.created_at.isoformat(),
@@ -175,5 +189,6 @@ def build_review_item(review) -> dict:
             "org_name": reviewer_org.name if reviewer_org else None,
             "org_type": reviewer_org.org_type if reviewer_org else None,
             "avatar_url": None,
+            "social": social or None,
         } if review.reviewer else None,
     }

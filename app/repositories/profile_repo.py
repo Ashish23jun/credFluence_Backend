@@ -233,6 +233,7 @@ async def get_reviews_page(
         select(Review)
         .options(
             _si(Review.reviewer).selectinload(User.organization),
+            _si(Review.reviewer).selectinload(User.social_accounts),
             _si(Review.ratings),
             _si(Review.payments),
             _si(Review.tags),
