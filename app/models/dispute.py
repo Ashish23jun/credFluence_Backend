@@ -28,7 +28,7 @@ class Dispute(Base):
     )
 
     type: Mapped[str] = mapped_column(
-        Enum("verification", "duplicate_name", "false_claim", name="dispute_type"),
+        Enum("verification", "duplicate_name", "false_claim", "recipient_dispute", name="dispute_type"),
         nullable=False,
         index=True,
     )

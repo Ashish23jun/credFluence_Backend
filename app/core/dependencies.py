@@ -95,6 +95,19 @@ async def get_current_user(
     return user_dict
 
 
+async def get_optional_user(
+    credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
+    db: AsyncSession = Depends(get_db),
+) -> dict | None:
+    """Returns the current user dict if a valid Bearer token is present, else None."""
+    if not credentials:
+        return None
+    try:
+        return await get_current_user(credentials=credentials, db=db)
+    except HTTPException:
+        return None
+
+
 async def require_onboarded(
     current_user: dict = Depends(get_current_user),
 ) -> dict:

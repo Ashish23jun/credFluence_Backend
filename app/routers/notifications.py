@@ -9,6 +9,8 @@ from app.core.cache import cache_delete, cache_get, cache_set
 from app.core.database import get_db
 from app.core.dependencies import get_current_user
 from app.models.notification import Notification
+from app.models.review import Review, ReviewEvidence
+from app.services.storage_service import presign_get
 
 router = APIRouter(prefix="/notifications", tags=["notifications"])
 
@@ -20,12 +22,19 @@ def _unread_key(user_id: str) -> str:
 
 
 def _notif_serialise(n: Notification) -> dict:
+    extra = dict(n.extra_data) if n.extra_data else {}
+    # Enrich evidence items with fresh presigned download URLs
+    if extra.get("evidence"):
+        extra["evidence"] = [
+            {**e, "url": presign_get(e.get("file_key"), expires=3600)}
+            for e in extra["evidence"]
+        ]
     return {
         "id": str(n.id),
         "type": n.notification_type,
         "title": n.title,
         "body": n.body,
-        "extra_data": n.extra_data,
+        "extra_data": extra,
         "is_read": n.is_read,
         "read_at": n.read_at.isoformat() if n.read_at else None,
         "created_at": n.created_at.isoformat(),
@@ -61,6 +70,33 @@ async def list_notifications(
     stmt = stmt.order_by(Notification.created_at.desc()).limit(limit)
     result = await db.execute(stmt)
     notifications = result.scalars().all()
+
+    # For old notifications that have evidence_count but no evidence array,
+    # fetch files from DB and patch extra_data in-place (not persisted).
+    legacy = [
+        n for n in notifications
+        if n.extra_data
+        and n.extra_data.get("evidence_count", 0) > 0
+        and not n.extra_data.get("evidence")
+        and n.extra_data.get("review_id")
+    ]
+    if legacy:
+        review_ids = [uuid.UUID(n.extra_data["review_id"]) for n in legacy]
+        ev_rows = (await db.execute(
+            select(ReviewEvidence).where(ReviewEvidence.review_id.in_(review_ids))
+        )).scalars().all()
+        ev_by_review: dict[str, list] = {}
+        for ev in ev_rows:
+            ev_by_review.setdefault(str(ev.review_id), []).append({
+                "id": str(ev.id),
+                "type": ev.type,
+                "filename": ev.file_key.rsplit("/", 1)[-1],
+                "file_key": ev.file_key,
+            })
+        for n in legacy:
+            rid = n.extra_data["review_id"]
+            if rid in ev_by_review:
+                n.extra_data = {**n.extra_data, "evidence": ev_by_review[rid]}
 
     # next_cursor is the created_at of the last item if a full page was returned
     next_cursor = notifications[-1].created_at.isoformat() if len(notifications) == limit else None

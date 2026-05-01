@@ -7,12 +7,15 @@ GET /profiles/{handle}           — single profile detail
 GET /profiles/{handle}/reviews   — paginated reviews for a profile
 """
 
+import uuid as _uuid
+
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import text
+from sqlalchemy import or_, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.cache import cache_get, cache_set
 from app.core.database import get_db
+from app.core.dependencies import get_optional_user
 from app.models.profile import Profile
 from app.models.review import Review
 from app.repositories import profile_repo
@@ -34,6 +37,7 @@ _IG_FOLLOWERS_SORT = text("""
      LIMIT 1) DESC NULLS LAST
 """)
 _PUBLIC_STATUSES = ("verified", "in_dispute_window", "disputed")
+_PARTY_STATUSES = ("verified", "in_dispute_window", "disputed", "pending_verification")
 
 
 # ---------------------------------------------------------------------------
@@ -179,15 +183,33 @@ async def get_profile_reviews(
     limit: int = Query(10, ge=1, le=50),
     relationship_type: str | None = Query(None),
     db: AsyncSession = Depends(get_db),
+    current_user: dict | None = Depends(get_optional_user),
 ) -> dict:
-    profile_id = await profile_repo.get_profile_id_by_handle(db, handle)
-    if not profile_id:
+    row = await profile_repo.get_profile_slim_by_handle(db, handle)
+    if not row:
         raise HTTPException(status_code=404, detail="Profile not found")
+    profile_id, target_org_id = row.id, row.organization_id
 
-    filters = [
-        Review.target_profile_id == profile_id,
-        Review.status.in_(_PUBLIC_STATUSES),
-    ]
+    # Visibility: only verified reviews are public.
+    # The reviewer and the recipient org also see in_dispute_window /
+    # disputed / pending_verification so they can act on them.
+    if current_user:
+        user_id = _uuid.UUID(current_user["id"])
+        user_org_id = (current_user.get("org") or {}).get("id")
+        is_recipient = user_org_id and str(target_org_id) == str(user_org_id)
+
+        if is_recipient:
+            status_filter = Review.status.in_(_PARTY_STATUSES)
+        else:
+            # Show public reviews plus the reviewer's own (any status)
+            status_filter = or_(
+                Review.status == "verified",
+                Review.reviewer_id == user_id,
+            )
+    else:
+        status_filter = Review.status == "verified"
+
+    filters = [Review.target_profile_id == profile_id, status_filter]
     if relationship_type:
         filters.append(Review.relationship_type == relationship_type)
 

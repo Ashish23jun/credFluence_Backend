@@ -6,7 +6,7 @@ from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
-from app.core.dependencies import get_current_user
+from app.core.dependencies import get_current_user, require_onboarded
 from app.models.organization import Organization
 from app.models.profile import Profile
 from app.models.review import Review, ReviewEvidence, ReviewFlag, ReviewPayment, ReviewRating, ReviewTag
@@ -318,6 +318,178 @@ async def submit_review(
                 if review.dispute_window_expires_at else None
             ),
         },
+    }
+
+
+# ---------------------------------------------------------------------------
+# POST /reviews/{review_id}/accept  — recipient accepts review → goes live
+# ---------------------------------------------------------------------------
+
+class RecipientDisputePayload(BaseModel):
+    reason: str
+    evidence_keys: list[str] = []
+
+
+@router.post("/{review_id}/accept")
+async def accept_review(
+    review_id: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(require_onboarded),
+) -> dict:
+    from sqlalchemy import select as _select
+    from sqlalchemy.orm import selectinload as _si
+    from app.models.organization import Organization
+    from app.models.profile import Profile
+    from app.models.user import User
+
+    review = (await db.execute(
+        _select(Review)
+        .options(
+            _si(Review.target_profile).selectinload(Profile.organization),
+            _si(Review.reviewer),
+        )
+        .where(Review.id == uuid.UUID(review_id))
+    )).scalar_one_or_none()
+
+    if not review:
+        raise HTTPException(status_code=404, detail="Review not found")
+
+    user_org_id = (current_user.get("org") or {}).get("id")
+    if not user_org_id or str(review.target_profile.organization_id) != str(user_org_id):
+        raise HTTPException(status_code=403, detail="Only the review recipient can accept a review")
+
+    if review.status != "in_dispute_window":
+        raise HTTPException(
+            status_code=409,
+            detail=f"Review cannot be accepted when status is '{review.status}'",
+        )
+
+    review.status = "verified"
+    review.verified_at = datetime.now(UTC)
+
+    # Patch review_status in all related review_received notifications
+    from sqlalchemy import update as _update
+    from app.models.notification import Notification
+    await db.execute(
+        _update(Notification)
+        .where(
+            Notification.notification_type == "review_received",
+            Notification.extra_data["review_id"].astext == review_id,
+        )
+        .values(extra_data=Notification.extra_data.op("||")({"review_status": "verified"}))
+    )
+
+    await db.commit()
+
+    from app.tasks.score import recalculate_trust_score
+    recalculate_trust_score.delay(str(review.target_profile_id))
+
+    from app.tasks.review_notifications import notify_review_verified
+    notify_review_verified.delay(review_id)
+
+    return {
+        "success": True,
+        "message": "Review accepted. It is now publicly visible on your profile.",
+        "data": {"review_id": review_id, "status": "verified"},
+    }
+
+
+# ---------------------------------------------------------------------------
+# POST /reviews/{review_id}/dispute  — recipient disputes a review
+# ---------------------------------------------------------------------------
+
+@router.post("/{review_id}/dispute")
+async def dispute_review(
+    review_id: str,
+    payload: RecipientDisputePayload,
+    db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(require_onboarded),
+) -> dict:
+    from sqlalchemy import select as _select
+    from sqlalchemy.orm import selectinload as _si
+    from app.models.dispute import Dispute
+    from app.models.dispute_recipient import DisputeRecipient
+    from app.models.profile import Profile
+    from app.models.user import User
+
+    review = (await db.execute(
+        _select(Review)
+        .options(_si(Review.target_profile))
+        .where(Review.id == uuid.UUID(review_id))
+    )).scalar_one_or_none()
+
+    if not review:
+        raise HTTPException(status_code=404, detail="Review not found")
+
+    user_org_id = (current_user.get("org") or {}).get("id")
+    if not user_org_id or str(review.target_profile.organization_id) != str(user_org_id):
+        raise HTTPException(status_code=403, detail="Only the review recipient can dispute a review")
+
+    if review.status != "in_dispute_window":
+        raise HTTPException(
+            status_code=409,
+            detail=f"Review cannot be disputed when status is '{review.status}'",
+        )
+
+    existing = (await db.execute(
+        _select(Dispute).where(Dispute.review_id == review.id)
+    )).scalar_one_or_none()
+    if existing:
+        raise HTTPException(status_code=409, detail="A dispute already exists for this review")
+
+    dispute = Dispute(
+        review_id=review.id,
+        filed_by_user_id=uuid.UUID(current_user["id"]),
+        type="recipient_dispute",
+        reason=payload.reason.strip(),
+        counter_evidence_keys=payload.evidence_keys if payload.evidence_keys else None,
+    )
+    db.add(dispute)
+    await db.flush()
+
+    db.add(DisputeRecipient(dispute_id=dispute.id, recipient_type="platform_admin"))
+
+    review.status = "disputed"
+
+    # Patch review_status in all related review_received notifications
+    from sqlalchemy import update as _update_d
+    from app.models.notification import Notification as _Notif
+    await db.execute(
+        _update_d(_Notif)
+        .where(
+            _Notif.notification_type == "review_received",
+            _Notif.extra_data["review_id"].astext == review_id,
+        )
+        .values(extra_data=_Notif.extra_data.op("||")({"review_status": "disputed"}))
+    )
+
+    await db.commit()
+
+    case_id = str(dispute.id)[:8].upper()
+
+    # Notify both parties
+    from app.tasks.review_notifications import send_email_task
+
+    reviewer = (await db.execute(
+        _select(User).where(User.id == review.reviewer_id)
+    )).scalar_one_or_none()
+
+    if reviewer:
+        send_email_task.delay(
+            "dispute_filed",
+            reviewer.email,
+            {"case_id": case_id, "review_id": str(review.id), "role": "reviewer"},
+        )
+    send_email_task.delay(
+        "dispute_filed",
+        current_user["email"],
+        {"case_id": case_id, "review_id": str(review.id), "role": "target"},
+    )
+
+    return {
+        "success": True,
+        "message": "Dispute filed. Platform admins will review and mediate within 48 hours.",
+        "data": {"dispute_id": str(dispute.id), "case_id": case_id},
     }
 
 

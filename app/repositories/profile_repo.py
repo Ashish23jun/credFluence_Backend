@@ -192,6 +192,16 @@ async def get_profile_id_by_handle(db: AsyncSession, handle: str):
     )).scalar_one_or_none()
 
 
+async def get_profile_slim_by_handle(db: AsyncSession, handle: str):
+    """Returns a Row with (.id, .organization_id) or None."""
+    return (await db.execute(
+        select(Profile.id, Profile.organization_id).where(
+            Profile.handle == handle,
+            Profile.is_opted_out.is_(False),
+        )
+    )).one_or_none()
+
+
 async def get_single_profile_ratings(db: AsyncSession, profile_id):
     score = cast(ReviewRating.score, Float)
     return (await db.execute(

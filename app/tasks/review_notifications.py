@@ -14,11 +14,12 @@ from sqlalchemy.orm import selectinload
 
 from app.core.database import task_db_session
 from app.core.email import (
+    send_dispute_filed_email,
+    send_dispute_resolved_email,
     send_platform_admin_alert_email,
+    send_review_live_email,
     send_review_received_email,
     send_review_received_invite_email,
-    send_review_live_email,
-    send_dispute_resolved_email,
 )
 from app.core.config import settings
 from app.models.notification import Notification
@@ -26,6 +27,7 @@ from app.models.organization_membership import OrganizationMembership
 from app.models.platform_admin import PlatformAdmin
 from app.models.profile import Profile
 from app.models.review import Review
+from app.models.social_account import SocialAccount
 from app.models.user import User
 from app.tasks.celery_app import celery_app
 
@@ -53,6 +55,12 @@ def notify_review_submitted(review_id: str) -> None:
     asyncio.run(_notify_review_submitted(review_id))
 
 
+@celery_app.task(name="app.tasks.review_notifications.notify_review_verified")
+def notify_review_verified(review_id: str) -> None:
+    """Triggered after recipient accepts a review. Creates in-app notification + email for reviewer."""
+    asyncio.run(_notify_review_verified(review_id))
+
+
 @celery_app.task(
     name="app.tasks.review_notifications.send_email_task",
     autoretry_for=(Exception,),
@@ -72,11 +80,23 @@ def send_email_task(kind: str, to_email: str, kwargs: dict, notification_id: str
 # Async implementations
 # ──────────────────────────────────────────────────────────────────────────────
 
+def _reviewer_social(reviewer: User) -> dict:
+    """Pick the most useful social handle to surface — Instagram first, then YouTube."""
+    result: dict = {"email": reviewer.email}
+    for acct in (reviewer.social_accounts or []):
+        if acct.platform == "instagram" and acct.username:
+            result["instagram"] = acct.username
+        elif acct.platform == "youtube" and acct.username:
+            result.setdefault("youtube", acct.username)
+    return result
+
+
 def _build_review_snapshot(review: Review, reviewer_name: str) -> dict:
     """Serialise all review data into a JSON-safe dict for emails + notification extra_data."""
     return {
         "review_id": str(review.id),
         "reviewer_name": reviewer_name,
+        "reviewer_contact": _reviewer_social(review.reviewer) if review.reviewer else {},
         "relationship": _REL_LABEL.get(review.relationship_type, review.relationship_type),
         "body": review.body or "",
         "total_deal_value": review.total_deal_value,
@@ -99,8 +119,60 @@ def _build_review_snapshot(review: Review, reviewer_name: str) -> dict:
             for f in review.flags
         ],
         "tags": [t.tag.replace("_", "-") for t in review.tags],
+        "review_status": review.status,
         "evidence_count": len(review.evidence),
+        "evidence": [
+            {
+                "id": str(e.id),
+                "type": e.type,
+                "filename": e.file_key.rsplit("/", 1)[-1],
+                "file_key": e.file_key,
+            }
+            for e in review.evidence
+        ],
     }
+
+
+async def _notify_review_verified(review_id: str) -> None:
+    """Create in-app Notification for the reviewer + email once a review goes verified."""
+    async with task_db_session() as db:
+        review = await db.scalar(
+            select(Review)
+            .where(Review.id == uuid.UUID(review_id))
+            .options(
+                selectinload(Review.target_profile).selectinload(Profile.organization),
+                selectinload(Review.reviewer),
+            )
+        )
+        if not review or not review.reviewer:
+            logger.warning("notify_review_verified: review %s not found or has no reviewer", review_id)
+            return
+
+        reviewer = review.reviewer
+        target_name = (
+            review.target_profile.organization.name
+            if review.target_profile and review.target_profile.organization
+            else "the profile"
+        )
+
+        notification = Notification(
+            user_id=reviewer.id,
+            notification_type="review_verified",
+            title="Your review is now live",
+            body=f"Your review for {target_name} has been accepted and is now publicly visible.",
+            extra_data={"review_id": str(review.id), "target_name": target_name},
+        )
+        db.add(notification)
+        await db.flush()
+
+        send_email_task.delay(
+            "review_live",
+            reviewer.email,
+            {"target_name": target_name, "review_id": str(review.id), "role": "reviewer"},
+            str(notification.id),
+        )
+
+        await db.commit()
 
 
 async def _notify_review_submitted(review_id: str) -> None:
@@ -111,6 +183,7 @@ async def _notify_review_submitted(review_id: str) -> None:
             .options(
                 selectinload(Review.target_profile).selectinload(Profile.organization),
                 selectinload(Review.reviewer).selectinload(User.organization),
+                selectinload(Review.reviewer).selectinload(User.social_accounts),
                 selectinload(Review.ratings),
                 selectinload(Review.payments),
                 selectinload(Review.flags),
@@ -251,6 +324,8 @@ async def _dispatch_email(
         await send_review_live_email(to_email, **kwargs)
     elif kind == "dispute_resolved":
         await send_dispute_resolved_email(to_email, **kwargs)
+    elif kind == "dispute_filed":
+        await send_dispute_filed_email(to_email, **kwargs)
     else:
         logger.error("unknown email kind: %s", kind)
         return  # don't mark email_sent on unknown kinds
