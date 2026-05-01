@@ -81,13 +81,31 @@ def send_email_task(kind: str, to_email: str, kwargs: dict, notification_id: str
 # ──────────────────────────────────────────────────────────────────────────────
 
 def _reviewer_social(reviewer: User) -> dict:
-    """Pick the most useful social handle to surface — Instagram first, then YouTube."""
+    """Pick the platform with the highest follower count as primary handle."""
     result: dict = {"email": reviewer.email}
+
+    candidates: list[tuple[int, str, str, str]] = []  # (followers, platform, handle, display)
     for acct in (reviewer.social_accounts or []):
-        if acct.platform == "instagram" and acct.username:
-            result["instagram"] = acct.username
-        elif acct.platform == "youtube" and acct.username:
-            result.setdefault("youtube", acct.username)
+        if not acct.username:
+            continue
+        stats = acct.stats or {}
+        if acct.platform == "instagram":
+            followers = int(stats.get("followers_count") or 0)
+            candidates.append((followers, "instagram", acct.username, acct.display_name or acct.username))
+        elif acct.platform == "youtube":
+            followers = int(stats.get("subscribers") or 0)
+            handle = stats.get("youtube_handle") or acct.username
+            candidates.append((followers, "youtube", handle, acct.display_name or handle))
+
+    if candidates:
+        candidates.sort(key=lambda x: x[0], reverse=True)
+        top_followers, top_platform, top_handle, top_display = candidates[0]
+        result[top_platform] = top_handle
+        result["primary_platform"] = top_platform
+        result["primary_handle"] = top_handle
+        result["primary_display"] = top_display
+        result["primary_followers"] = top_followers
+
     return result
 
 
