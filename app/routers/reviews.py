@@ -1,25 +1,48 @@
+import base64
+import contextlib
+import json
 import uuid
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from app.core.database import get_db
 from app.core.dependencies import get_current_user, require_onboarded
+from app.models.dispute import Dispute
+from app.models.dispute_recipient import DisputeRecipient
+from app.models.notification import Notification
 from app.models.organization import Organization
 from app.models.profile import Profile
-from app.models.review import Review, ReviewEvidence, ReviewFlag, ReviewPayment, ReviewRating, ReviewTag
-from app.repositories.profile_repo import get_profile_by_handle
+from app.models.review import (
+    Review,
+    ReviewEvidence,
+    ReviewFlag,
+    ReviewPayment,
+    ReviewRating,
+    ReviewTag,
+)
+from app.models.user import User
+from app.repositories.profile_repo import get_my_reviews_cursor, get_profile_by_handle
 from app.services.storage_service import presign_put
+from app.tasks.review_notifications import (
+    notify_review_submitted,
+    notify_review_verified,
+    send_email_task,
+)
+from app.tasks.score import recalculate_trust_score
 
 router = APIRouter(prefix="/reviews", tags=["reviews"])
 
 _ALLOWED_MIME = {
     "image/jpeg", "image/png", "image/webp",
     "application/pdf",
+    "video/mp4", "video/quicktime", "video/webm",
 }
-_EVIDENCE_TYPES = {"screenshot", "email", "contract", "invoice", "chat"}
+_EVIDENCE_TYPES = {"screenshot", "email", "contract", "invoice", "chat", "video"}
 _VALID_KINDS = {"creator", "agency", "brand"}
 
 _VALID_RELATIONSHIPS = {
@@ -117,6 +140,7 @@ async def presign_evidence_upload(
     ext_map = {
         "image/jpeg": "jpg", "image/png": "png",
         "image/webp": "webp", "application/pdf": "pdf",
+        "video/mp4": "mp4", "video/quicktime": "mov", "video/webm": "webm",
     }
     ext = ext_map.get(payload.content_type, "bin")
     key = f"review-evidence/{current_user['org']['id']}/{uuid.uuid4()}.{ext}"
@@ -139,6 +163,12 @@ async def submit_review(
     db: AsyncSession = Depends(get_db),
     current_user: dict = Depends(get_current_user),
 ) -> dict:
+    if current_user["role"] == "creator" and current_user.get("access_level") == "limited":
+        raise HTTPException(
+            status_code=403,
+            detail="Connect at least one platform (Instagram or YouTube) to write reviews.",
+        )
+
     # Validate: exactly one target source
     if not payload.target_profile_handle and not payload.off_platform:
         raise HTTPException(status_code=422, detail="Provide target_profile_handle or off_platform")
@@ -246,16 +276,11 @@ async def submit_review(
         due_date = None
         paid_at = None
         if p.due_date:
-            try:
-                from datetime import date as _date
-                due_date = _date.fromisoformat(p.due_date)
-            except ValueError:
-                pass
+            with contextlib.suppress(ValueError):
+                due_date = date.fromisoformat(p.due_date)
         if p.paid_at:
-            try:
+            with contextlib.suppress(ValueError):
                 paid_at = datetime.fromisoformat(p.paid_at).replace(tzinfo=UTC)
-            except ValueError:
-                pass
         db.add(ReviewPayment(
             review_id=review.id,
             amount=p.amount,
@@ -299,7 +324,6 @@ async def submit_review(
     await db.commit()
 
     # Fire fanout: in-app notifications + email (+ WhatsApp later)
-    from app.tasks.review_notifications import notify_review_submitted
     notify_review_submitted.delay(str(review.id))
 
     success_message = (
@@ -336,17 +360,11 @@ async def accept_review(
     db: AsyncSession = Depends(get_db),
     current_user: dict = Depends(require_onboarded),
 ) -> dict:
-    from sqlalchemy import select as _select
-    from sqlalchemy.orm import selectinload as _si
-    from app.models.organization import Organization
-    from app.models.profile import Profile
-    from app.models.user import User
-
     review = (await db.execute(
-        _select(Review)
+        select(Review)
         .options(
-            _si(Review.target_profile).selectinload(Profile.organization),
-            _si(Review.reviewer),
+            selectinload(Review.target_profile).selectinload(Profile.organization),
+            selectinload(Review.reviewer),
         )
         .where(Review.id == uuid.UUID(review_id))
     )).scalar_one_or_none()
@@ -368,10 +386,8 @@ async def accept_review(
     review.verified_at = datetime.now(UTC)
 
     # Patch review_status in all related review_received notifications
-    from sqlalchemy import update as _update
-    from app.models.notification import Notification
     await db.execute(
-        _update(Notification)
+        update(Notification)
         .where(
             Notification.notification_type == "review_received",
             Notification.extra_data["review_id"].astext == review_id,
@@ -381,10 +397,7 @@ async def accept_review(
 
     await db.commit()
 
-    from app.tasks.score import recalculate_trust_score
     recalculate_trust_score.delay(str(review.target_profile_id))
-
-    from app.tasks.review_notifications import notify_review_verified
     notify_review_verified.delay(review_id)
 
     return {
@@ -405,16 +418,9 @@ async def dispute_review(
     db: AsyncSession = Depends(get_db),
     current_user: dict = Depends(require_onboarded),
 ) -> dict:
-    from sqlalchemy import select as _select
-    from sqlalchemy.orm import selectinload as _si
-    from app.models.dispute import Dispute
-    from app.models.dispute_recipient import DisputeRecipient
-    from app.models.profile import Profile
-    from app.models.user import User
-
     review = (await db.execute(
-        _select(Review)
-        .options(_si(Review.target_profile))
+        select(Review)
+        .options(selectinload(Review.target_profile))
         .where(Review.id == uuid.UUID(review_id))
     )).scalar_one_or_none()
 
@@ -432,7 +438,7 @@ async def dispute_review(
         )
 
     existing = (await db.execute(
-        _select(Dispute).where(Dispute.review_id == review.id)
+        select(Dispute).where(Dispute.review_id == review.id)
     )).scalar_one_or_none()
     if existing:
         raise HTTPException(status_code=409, detail="A dispute already exists for this review")
@@ -452,26 +458,21 @@ async def dispute_review(
     review.status = "disputed"
 
     # Patch review_status in all related review_received notifications
-    from sqlalchemy import update as _update_d
-    from app.models.notification import Notification as _Notif
     await db.execute(
-        _update_d(_Notif)
+        update(Notification)
         .where(
-            _Notif.notification_type == "review_received",
-            _Notif.extra_data["review_id"].astext == review_id,
+            Notification.notification_type == "review_received",
+            Notification.extra_data["review_id"].astext == review_id,
         )
-        .values(extra_data=_Notif.extra_data.op("||")({"review_status": "disputed"}))
+        .values(extra_data=Notification.extra_data.op("||")({"review_status": "disputed"}))
     )
 
     await db.commit()
 
     case_id = str(dispute.id)[:8].upper()
 
-    # Notify both parties
-    from app.tasks.review_notifications import send_email_task
-
     reviewer = (await db.execute(
-        _select(User).where(User.id == review.reviewer_id)
+        select(User).where(User.id == review.reviewer_id)
     )).scalar_one_or_none()
 
     if reviewer:
@@ -500,3 +501,85 @@ async def dispute_review(
 @router.get("")
 async def list_reviews() -> dict:
     return {"success": True, "message": "TODO", "data": []}
+
+
+# ---------------------------------------------------------------------------
+# GET /reviews/mine  — reviews submitted by the current user (cursor pagination)
+# ---------------------------------------------------------------------------
+
+def _encode_cursor(created_at: datetime, row_id: uuid.UUID) -> str:
+    payload = {"ca": created_at.isoformat(), "id": str(row_id)}
+    return base64.urlsafe_b64encode(json.dumps(payload).encode()).decode()
+
+
+def _decode_cursor(cursor: str):
+    try:
+        payload = json.loads(base64.urlsafe_b64decode(cursor.encode()))
+        return datetime.fromisoformat(payload["ca"]), uuid.UUID(payload["id"])
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid cursor") from None
+
+
+@router.get("/mine")
+async def my_reviews(
+    cursor: str | None = None,
+    limit: int = 20,
+    db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+) -> dict:
+    limit = max(1, min(limit, 50))
+    reviewer_id = uuid.UUID(current_user["id"])
+
+    cursor_created_at, cursor_id = None, None
+    if cursor:
+        cursor_created_at, cursor_id = _decode_cursor(cursor)
+
+    reviews = await get_my_reviews_cursor(
+        db, reviewer_id, limit + 1, cursor_created_at, cursor_id
+    )
+
+    has_more = len(reviews) > limit
+    page = reviews[:limit]
+
+    next_cursor = (
+        _encode_cursor(page[-1].created_at, page[-1].id)
+        if has_more and page
+        else None
+    )
+
+    items = []
+    for rev in page:
+        target = rev.target_profile
+        scores = [r.score for r in rev.ratings] if rev.ratings else []
+        avg = round(sum(scores) / len(scores), 2) if scores else None
+        items.append({
+            "id": str(rev.id),
+            "relationship_type": rev.relationship_type,
+            "body": rev.body,
+            "avg_rating": avg,
+            "ratings": [{"category": r.category, "score": r.score} for r in (rev.ratings or [])],
+            "tags": [t.tag for t in (rev.tags or [])],
+            "status": rev.status,
+            "dispute_window_expires_at": (
+                rev.dispute_window_expires_at.isoformat()
+                if rev.dispute_window_expires_at else None
+            ),
+            "created_at": rev.created_at.isoformat(),
+            "target": {
+                "handle": target.handle if target else None,
+                "display_name": target.display_name if target else None,
+                "profile_type": target.profile_type if target else None,
+                "avatar_url": target.avatar_url if target else None,
+                "is_dummy": bool(target.is_dummy) if target else False,
+            } if target else None,
+        })
+
+    return {
+        "success": True,
+        "message": "Reviews retrieved.",
+        "data": {
+            "items": items,
+            "next_cursor": next_cursor,
+            "limit": limit,
+        },
+    }

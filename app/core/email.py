@@ -308,6 +308,40 @@ async def send_dispute_filed_email(to_email: str, case_id: str, review_id: str, 
     await send_email(to_email, f"Dispute filed — Case {case_id}", html, text)
 
 
+async def send_password_reset_email(to_email: str, otp: str) -> None:
+    text = f"Your CredFluence password reset code is: {otp}\n\nIt expires in 10 minutes."
+    html = _wrap(
+        title="Reset your password",
+        intro="Use the code below to reset your CredFluence password. It expires in <strong>10 minutes</strong>.",
+        body_html=f"""
+      <div style="background:#1C1C21;border-radius:10px;padding:24px;text-align:center;margin-bottom:20px;">
+        <div style="font-size:11px;color:rgba(245,241,234,0.45);letter-spacing:0.08em;text-transform:uppercase;margin-bottom:12px;font-family:monospace;">Reset code</div>
+        <span style="font-size:36px;font-weight:700;letter-spacing:10px;color:#E8FF5B;font-family:monospace;">{otp}</span>
+      </div>""",
+        footer="If you didn't request a password reset, you can safely ignore this email. Your password won't change.",
+    )
+    await send_email(to_email, f"Reset your CredFluence password — code: {otp}", html, text)
+
+
+async def send_account_deletion_email(to_email: str, days_remaining: int = 30) -> None:
+    html = _wrap(
+        title="Account deletion scheduled",
+        intro="Your CredFluence account has been scheduled for deletion.",
+        body_html=f"""
+      <div style="background:#1C1C21;border:1px solid rgba(255,100,100,0.2);border-radius:10px;padding:20px;margin-bottom:20px;">
+        <p style="color:rgba(245,241,234,0.72);font-size:14px;line-height:1.6;margin:0 0 12px;">
+          Your account and all associated data will be <strong style="color:#FF6464;">permanently deleted</strong> in <strong style="color:#F5F1EA;">{days_remaining} days</strong>.
+        </p>
+        <p style="color:rgba(245,241,234,0.72);font-size:14px;line-height:1.6;margin:0;">
+          Changed your mind? Simply <strong style="color:#E8FF5B;">log in again</strong> within {days_remaining} days and your account will be fully restored.
+        </p>
+      </div>""",
+        footer="If you didn't request this, log in immediately to cancel the deletion.",
+    )
+    text = f"Your CredFluence account is scheduled for deletion in {days_remaining} days. Log in to cancel."
+    await send_email(to_email, "Your CredFluence account is scheduled for deletion", html, text)
+
+
 async def send_dispute_resolved_email(to_email: str, case_id: str, outcome: str) -> None:
     """Sent to both reviewer and target when admin resolves a dispute."""
     url = f"{settings.frontend_url}/disputes/{case_id}"

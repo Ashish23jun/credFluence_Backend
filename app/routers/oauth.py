@@ -202,6 +202,9 @@ async def google_callback(
         if not user:
             error_params = urlencode({"error": "account_not_found"})
             return RedirectResponse(url=f"{settings.frontend_url}/auth/callback?{error_params}")
+        # Backfill full_name from Google if it was never set
+        if name and not user.full_name:
+            user.full_name = name
         if picture and user.organization_id:
             prof_result = await db.execute(
                 select(Profile).where(Profile.organization_id == user.organization_id)
@@ -214,6 +217,7 @@ async def google_callback(
             user = User(
                 email=email,
                 google_id=google_id,
+                full_name=name or None,
                 role=role,
                 is_verified=True,
             )
@@ -222,6 +226,9 @@ async def google_callback(
             error_params = urlencode({"error": "role_mismatch", "existing_role": user.role})
             return RedirectResponse(url=f"{settings.frontend_url}/auth/callback?{error_params}")
         else:
+            # Backfill full_name from Google if it was never set
+            if name and not user.full_name:
+                user.full_name = name
             if picture and user.organization_id:
                 prof_result = await db.execute(
                     select(Profile).where(Profile.organization_id == user.organization_id)

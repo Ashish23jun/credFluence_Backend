@@ -6,7 +6,7 @@ from sqlalchemy.orm import selectinload
 
 from app.core.cache import cache_get, cache_set, user_key
 from app.core.database import get_db
-from app.core.security import decode_token
+from app.core.security import decode_token, decrypt_phone
 
 bearer_scheme = HTTPBearer(auto_error=False)
 admin_bearer_scheme = HTTPBearer(auto_error=False)
@@ -49,6 +49,8 @@ async def get_current_user(
         return cached
 
     # Cache miss — fetch from DB with org + membership
+    from app.models.profile import Profile
+    from app.models.social_account import SocialAccount
     from app.models.user import User
 
     result = await db.execute(
@@ -68,9 +70,47 @@ async def get_current_user(
         (m for m in user.memberships if m.organization_id == org.id), None
     ) if org else None
 
+    access_level = "full"
+    if user.role == "creator" and org:
+        prof_result = await db.execute(
+            select(Profile).where(Profile.organization_id == org.id)
+        )
+        profile = prof_result.scalar_one_or_none()
+        if profile:
+            if profile.access_level == "limited":
+                # Auto-upgrade if a qualifying social account exists
+                sa_result = await db.execute(
+                    select(SocialAccount).where(SocialAccount.user_id == user.id)
+                )
+                accounts = sa_result.scalars().all()
+                qualified = any(
+                    (a.platform == "youtube" and (a.stats or {}).get("meets_threshold"))
+                    or (a.platform == "instagram" and (a.stats or {}).get("account_type") in ("BUSINESS", "MEDIA_CREATOR"))
+                    for a in accounts
+                )
+                if qualified:
+                    profile.access_level = "full"
+                    await db.commit()
+                    access_level = "full"
+                else:
+                    access_level = "limited"
+            else:
+                access_level = profile.access_level
+        else:
+            access_level = "limited"
+
+    phone = None
+    if user.phone_encrypted:
+        try:
+            phone = decrypt_phone(user.phone_encrypted)
+        except Exception:
+            pass
+
     user_dict = {
         "id": str(user.id),
         "email": user.email,
+        "full_name": user.full_name,
+        "phone": phone,
         "role": user.role,
         "is_active": user.is_active,
         "is_verified": user.is_verified,
@@ -80,6 +120,7 @@ async def get_current_user(
             user.onboarding_completed_at.isoformat()
             if user.onboarding_completed_at else None
         ),
+        "access_level": access_level,
         "org": {
             "id": str(org.id),
             "name": org.name,
@@ -191,8 +232,9 @@ async def get_current_platform_admin(
 
     admin_id = payload.get("sub")
 
-    from app.models.platform_admin import PlatformAdmin
     from sqlalchemy import select as sa_select
+
+    from app.models.platform_admin import PlatformAdmin
 
     result = await db.execute(
         sa_select(PlatformAdmin).where(PlatformAdmin.id == admin_id)

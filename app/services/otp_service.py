@@ -7,6 +7,7 @@ OTP_TTL = 600          # 10 minutes
 PENDING_TTL = 600      # same window — pending signup expires with OTP
 OTP_PREFIX = "otp:"
 PENDING_PREFIX = "pending_signup:"
+PWD_RESET_PREFIX = "pwd_reset:"
 
 
 def generate_otp() -> str:
@@ -49,3 +50,21 @@ async def get_pending_signup(email: str) -> dict | None:
 async def delete_pending_signup(email: str) -> None:
     redis = await get_redis()
     await redis.delete(f"{PENDING_PREFIX}{email}")
+
+
+# ── Password reset OTP ────────────────────────────────────────────────────────
+
+async def store_pwd_reset_otp(email: str, otp: str) -> None:
+    redis = await get_redis()
+    await redis.setex(f"{PWD_RESET_PREFIX}{email}", OTP_TTL, otp)
+
+
+async def verify_pwd_reset_otp(email: str, otp: str) -> bool:
+    redis = await get_redis()
+    stored = await redis.get(f"{PWD_RESET_PREFIX}{email}")
+    return stored == otp
+
+
+async def delete_pwd_reset_otp(email: str) -> None:
+    redis = await get_redis()
+    await redis.delete(f"{PWD_RESET_PREFIX}{email}")

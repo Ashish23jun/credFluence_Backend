@@ -1,12 +1,13 @@
 import re
 
-from sqlalchemy import Float, case, cast, func, or_, select, text
+from sqlalchemy import Float, and_, case, cast, func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.models.profile import Profile
 from app.models.review import Review, ReviewRating
 from app.models.tag_aggregation import TagAggregation
+from app.models.user import User
 
 _PUBLIC_STATUSES = ("verified",)
 _TRGM_SINGLE_THRESHOLD = 0.35  # word_similarity floor for single-word typo tolerance
@@ -227,16 +228,14 @@ async def get_reviews_page(
     offset: int,
     limit: int,
 ) -> list[Review]:
-    from app.models.user import User
-    from sqlalchemy.orm import selectinload as _si
     result = await db.execute(
         select(Review)
         .options(
-            _si(Review.reviewer).selectinload(User.organization),
-            _si(Review.reviewer).selectinload(User.social_accounts),
-            _si(Review.ratings),
-            _si(Review.payments),
-            _si(Review.tags),
+            selectinload(Review.reviewer).selectinload(User.organization),
+            selectinload(Review.reviewer).selectinload(User.social_accounts),
+            selectinload(Review.ratings),
+            selectinload(Review.payments),
+            selectinload(Review.tags),
         )
         .where(*filters)
         .order_by(Review.created_at.desc())
@@ -250,3 +249,35 @@ async def count_reviews(db: AsyncSession, filters: list) -> int:
     return (
         await db.execute(select(func.count(Review.id)).where(*filters))
     ).scalar_one()
+
+
+async def get_my_reviews_cursor(
+    db: AsyncSession,
+    reviewer_id,
+    limit: int,
+    cursor_created_at=None,
+    cursor_id=None,
+) -> list[Review]:
+    stmt = (
+        select(Review)
+        .options(
+            selectinload(Review.target_profile),
+            selectinload(Review.ratings),
+            selectinload(Review.tags),
+        )
+        .where(Review.reviewer_id == reviewer_id)
+    )
+
+    if cursor_created_at is not None and cursor_id is not None:
+        stmt = stmt.where(
+            or_(
+                Review.created_at < cursor_created_at,
+                and_(
+                    Review.created_at == cursor_created_at,
+                    Review.id < cursor_id,
+                ),
+            )
+        )
+
+    stmt = stmt.order_by(Review.created_at.desc(), Review.id.desc()).limit(limit)
+    return (await db.execute(stmt)).scalars().all()

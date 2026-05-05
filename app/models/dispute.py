@@ -65,6 +65,7 @@ class Dispute(Base):
 
     # Relationships
     review: Mapped["Review"] = relationship("Review", back_populates="dispute")
+    filed_by_user: Mapped["User"] = relationship("User", foreign_keys=[filed_by_user_id])
     recipients: Mapped[list["DisputeRecipient"]] = relationship(
         "DisputeRecipient", back_populates="dispute", cascade="all, delete-orphan"
     )

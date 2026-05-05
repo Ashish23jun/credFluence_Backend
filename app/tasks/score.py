@@ -2,20 +2,25 @@
 import asyncio
 import logging
 import uuid
-
 from datetime import UTC, datetime
 
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
+from app.core.cache import cache_set
 from app.core.database import task_db_session
 from app.models.notification import Notification
 from app.models.organization_membership import OrganizationMembership
 from app.models.profile import Profile
 from app.models.review import Review
+from app.models.score_history import ScoreHistory
 from app.models.user import User
+from app.repositories.profile_repo import get_leaderboard_profiles
+from app.repositories.social_account_repo import get_accounts_by_org_ids
+from app.services.profile_service import build_leaderboard_item
 from app.services.score_engine import ReviewSignals, compute_new_trust_score
 from app.tasks.celery_app import celery_app
+from app.tasks.review_notifications import send_email_task
 
 logger = logging.getLogger(__name__)
 
@@ -92,8 +97,6 @@ async def _check_dispute_windows() -> None:
                 target_profile.organization.name
                 if target_profile.organization else "your organisation"
             )
-
-            from app.tasks.review_notifications import send_email_task
 
             # Notify target org admins — flush each row to get its ID
             email_kwargs = {"target_name": target_name, "review_id": str(review.id), "role": "target"}
@@ -174,6 +177,12 @@ async def _recalculate_trust_score(profile_id: str) -> None:
 
         profile.trust_score = current_score
         profile.review_count = len(reviews)
+        db.add(ScoreHistory(
+            profile_id=pid,
+            score=current_score,
+            review_count=len(reviews),
+            reason="review_verified",
+        ))
         await db.commit()
 
         logger.info(
@@ -183,5 +192,16 @@ async def _recalculate_trust_score(profile_id: str) -> None:
 
 
 async def _refresh_leaderboard_cache() -> None:
-    # Stub — implement when leaderboard endpoint is built
-    pass
+    roles = [None, "creator", "agency", "brand"]
+    limit = 20
+    async with task_db_session() as db:
+        for role in roles:
+            profiles = await get_leaderboard_profiles(db, role, None, limit)
+            org_ids = [p.organization_id for p in profiles]
+            org_sa_map = await get_accounts_by_org_ids(db, org_ids)
+            items = [
+                build_leaderboard_item(p, p.organization, org_sa_map.get(str(p.organization_id), []))
+                for p in profiles
+            ]
+            cache_key = f"leaderboard:{role or 'all'}:all:{limit}"
+            await cache_set(cache_key, {"success": True, "message": "OK", "data": items}, ttl_seconds=300)

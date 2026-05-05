@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.models.organization import Organization
+from app.models.profile import Profile
 from app.models.social_account import SocialAccount
 
 
@@ -79,3 +80,10 @@ async def maybe_verify_creator(db: AsyncSession, user) -> None:
     if org.verification_status != "verified":
         org.verification_status = "verified"
         org.verified_at = datetime.now(UTC)
+
+    profile_result = await db.execute(
+        select(Profile).where(Profile.organization_id == user.organization_id)
+    )
+    profile = profile_result.scalar_one_or_none()
+    if profile and profile.access_level != "full":
+        profile.access_level = "full"

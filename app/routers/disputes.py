@@ -83,9 +83,12 @@ async def list_disputes(
         "data": [
             {
                 "id": str(d.id),
+                "review_id": str(d.review_id),
                 "type": d.type,
                 "status": d.status,
                 "reason": d.reason,
+                "outcome": d.outcome,
+                "resolution_notes": d.resolution_notes,
                 "created_at": d.created_at.isoformat(),
             }
             for d in disputes

@@ -1,23 +1,26 @@
 """
 Profiles router — public read-only endpoints.
 
-GET /profiles                    — paginated list with filters
-GET /profiles/leaderboard        — top profiles by trust score (Redis cached, 5 min TTL)
-GET /profiles/{handle}           — single profile detail
-GET /profiles/{handle}/reviews   — paginated reviews for a profile
+GET  /profiles                       — paginated list with filters
+GET  /profiles/leaderboard           — top profiles by trust score (Redis cached, 5 min TTL)
+GET  /profiles/{handle}              — single profile detail
+GET  /profiles/{handle}/reviews      — paginated reviews for a profile
+GET  /profiles/{handle}/score-history
+DELETE /profiles/{handle}/opt-out    — GDPR: mask PII, hide from listings
 """
 
 import uuid as _uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import or_, text
+from sqlalchemy import or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.cache import cache_get, cache_set
+from app.core.cache import cache_get, cache_set, invalidate_profile
 from app.core.database import get_db
-from app.core.dependencies import get_optional_user
+from app.core.dependencies import get_current_user, get_optional_user
 from app.models.profile import Profile
 from app.models.review import Review
+from app.models.score_history import ScoreHistory
 from app.repositories import profile_repo
 from app.repositories.social_account_repo import get_accounts_by_org_ids
 from app.services import profile_service
@@ -37,7 +40,7 @@ _IG_FOLLOWERS_SORT = text("""
      LIMIT 1) DESC NULLS LAST
 """)
 _PUBLIC_STATUSES = ("verified", "in_dispute_window", "disputed")
-_PARTY_STATUSES = ("verified", "in_dispute_window", "disputed", "pending_verification")
+_PARTY_STATUSES = ("verified", "in_dispute_window", "disputed", "pending_verification", "rejected", "quarantined")
 
 
 # ---------------------------------------------------------------------------
@@ -149,6 +152,39 @@ async def get_leaderboard(
 
 
 # ---------------------------------------------------------------------------
+# GET /profiles/{handle}/score-history
+# ---------------------------------------------------------------------------
+
+@router.get("/{handle}/score-history")
+async def get_score_history(
+    handle: str,
+    limit: int = Query(20, ge=1, le=100),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    row = await profile_repo.get_profile_id_by_handle(db, handle)
+    if not row:
+        raise HTTPException(status_code=404, detail="Profile not found")
+
+    result = await db.execute(
+        select(ScoreHistory)
+        .where(ScoreHistory.profile_id == row)
+        .order_by(ScoreHistory.created_at.desc())
+        .limit(limit)
+    )
+    entries = result.scalars().all()
+
+    return {"success": True, "message": "OK", "data": [
+        {
+            "score": e.score,
+            "review_count": e.review_count,
+            "reason": e.reason,
+            "created_at": e.created_at.isoformat(),
+        }
+        for e in reversed(entries)  # chronological order for charting
+    ]}
+
+
+# ---------------------------------------------------------------------------
 # GET /profiles/{handle}
 # ---------------------------------------------------------------------------
 
@@ -225,3 +261,34 @@ async def get_profile_reviews(
         "limit": limit,
         "pages": -(-total // limit),
     }}
+
+
+# ---------------------------------------------------------------------------
+# DELETE /profiles/{handle}/opt-out  — GDPR
+# ---------------------------------------------------------------------------
+
+@router.delete("/{handle}/opt-out")
+async def opt_out_profile(
+    handle: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+) -> dict:
+    profile = await profile_repo.get_profile_by_handle(db, handle)
+    if not profile:
+        raise HTTPException(status_code=404, detail="Profile not found")
+
+    user_org_id = (current_user.get("org") or {}).get("id")
+    if not user_org_id or str(profile.organization_id) != str(user_org_id):
+        raise HTTPException(status_code=403, detail="You can only opt out your own profile")
+
+    profile.is_opted_out = True
+    profile.bio = None
+    profile.location = None
+    profile.avatar_url = None
+    profile.social_links = None
+    profile.niches = None
+    profile.languages = None
+    await db.commit()
+    await invalidate_profile(str(profile.id), handle)
+
+    return {"success": True, "message": "Profile opted out. Your data has been removed from public listings."}
