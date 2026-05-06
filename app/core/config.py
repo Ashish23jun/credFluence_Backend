@@ -80,6 +80,9 @@ class Settings(BaseSettings):
     # Sentry
     sentry_dsn: str = ""
 
+    # Elasticsearch
+    es_host: str = "http://localhost:9200"  # docker: http://elasticsearch:9200
+
     # Frontend URL (for OAuth redirects)
     frontend_url: str = "http://localhost:5173"
 

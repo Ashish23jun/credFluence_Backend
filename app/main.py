@@ -120,13 +120,20 @@ async def health_check() -> dict:
 
 @app.on_event("startup")
 async def startup() -> None:
+    from app.repositories import es_repo
     logger.info("credfluence_api_starting", env=settings.app_env)
+    try:
+        await es_repo.ensure_index()
+    except Exception as e:
+        logger.warning("elasticsearch_unavailable_on_startup", error=str(e))
 
 
 @app.on_event("shutdown")
 async def shutdown() -> None:
+    from app.core.elastic import close_es
     from app.core.http_client import close_http_client
     from app.core.redis import close_redis
     await close_http_client()
     await close_redis()
+    await close_es()
     logger.info("credfluence_api_stopped")

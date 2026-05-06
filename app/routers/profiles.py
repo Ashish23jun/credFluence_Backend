@@ -9,6 +9,7 @@ GET  /profiles/{handle}/score-history
 DELETE /profiles/{handle}/opt-out    — GDPR: mask PII, hide from listings
 """
 
+import logging
 import uuid as _uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -21,9 +22,11 @@ from app.core.dependencies import get_current_user, get_optional_user
 from app.models.profile import Profile
 from app.models.review import Review
 from app.models.score_history import ScoreHistory
-from app.repositories import profile_repo
+from app.repositories import es_repo, profile_repo
 from app.repositories.social_account_repo import get_accounts_by_org_ids
 from app.services import profile_service
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/profiles", tags=["profiles"])
 
@@ -63,7 +66,51 @@ async def list_profiles(
         sort = "trust_desc"
 
     search_query = q.strip() if q and q.strip() else None
+    offset = (page - 1) * limit
 
+    # ── Elasticsearch path (search queries only) ──────────────────────────────
+    if search_query:
+        try:
+            es_hits, total = await es_repo.search_profiles(
+                q=search_query,
+                kind=kind,
+                category=category,
+                offset=offset,
+                limit=limit,
+                sort=sort,
+            )
+            if es_hits:
+                # ES returned results — fetch full profile data from Postgres
+                # using the profile_ids ES gave us (preserving ES rank order)
+                profile_ids_ordered = [_uuid.UUID(h["profile_id"]) for h in es_hits]
+                profiles = await profile_repo.get_profiles_by_ids(db, profile_ids_ordered)
+                # Re-sort to match ES ranking order
+                id_to_profile = {p.id: p for p in profiles}
+                profiles = [id_to_profile[pid] for pid in profile_ids_ordered if pid in id_to_profile]
+
+                org_ids = [p.organization_id for p in profiles]
+                profile_ids = [p.id for p in profiles]
+                ratings_map = await profile_repo.get_avg_ratings_for_profiles(db, profile_ids)
+                org_sa_map = await get_accounts_by_org_ids(db, org_ids)
+                tags_map = await profile_repo.get_tags_for_profiles(db, profile_ids)
+
+                items = [
+                    profile_service.build_profile_list_item(
+                        p, p.organization,
+                        org_sa_map.get(str(p.organization_id), []),
+                        ratings_map.get(str(p.id)),
+                        tags_map.get(str(p.id), []),
+                    )
+                    for p in profiles
+                ]
+                return {"success": True, "message": "OK", "data": {
+                    "items": items, "total": total, "page": page, "limit": limit,
+                    "pages": -(-total // limit),
+                }}
+        except Exception:
+            logger.warning("Elasticsearch unavailable, falling back to Postgres search")
+
+    # ── Postgres path (no search query, or ES fallback) ───────────────────────
     filters = [
         Profile.is_opted_out.is_(False),
         Profile.handle.isnot(None),
@@ -74,17 +121,16 @@ async def list_profiles(
         filters.append(Profile.category == category)
 
     order_col = {
-        "trust_desc":    Profile.trust_score.desc(),
-        "trust_asc":     Profile.trust_score.asc(),
-        "review_count":  Profile.review_count.desc(),
-        "newest":        Profile.created_at.desc(),
+        "trust_desc":     Profile.trust_score.desc(),
+        "trust_asc":      Profile.trust_score.asc(),
+        "review_count":   Profile.review_count.desc(),
+        "newest":         Profile.created_at.desc(),
         "followers_desc": _IG_FOLLOWERS_SORT,
     }[sort]
 
     total = await profile_repo.count_profiles(db, filters, search_query=search_query)
     profiles = await profile_repo.get_profiles_page(
-        db, filters, order_col, offset=(page - 1) * limit, limit=limit,
-        search_query=search_query,
+        db, filters, order_col, offset=offset, limit=limit, search_query=search_query,
     )
 
     if not profiles:
@@ -94,27 +140,21 @@ async def list_profiles(
 
     profile_ids = [p.id for p in profiles]
     org_ids = [p.organization_id for p in profiles]
-
     ratings_map = await profile_repo.get_avg_ratings_for_profiles(db, profile_ids)
     org_sa_map = await get_accounts_by_org_ids(db, org_ids)
     tags_map = await profile_repo.get_tags_for_profiles(db, profile_ids)
 
     items = [
         profile_service.build_profile_list_item(
-            p,
-            p.organization,
+            p, p.organization,
             org_sa_map.get(str(p.organization_id), []),
             ratings_map.get(str(p.id)),
             tags_map.get(str(p.id), []),
         )
         for p in profiles
     ]
-
     return {"success": True, "message": "OK", "data": {
-        "items": items,
-        "total": total,
-        "page": page,
-        "limit": limit,
+        "items": items, "total": total, "page": page, "limit": limit,
         "pages": -(-total // limit),
     }}
 
@@ -290,5 +330,8 @@ async def opt_out_profile(
     profile.languages = None
     await db.commit()
     await invalidate_profile(str(profile.id), handle)
+
+    from app.tasks.es_sync import sync_profile_to_es
+    sync_profile_to_es.delay(str(profile.id))
 
     return {"success": True, "message": "Profile opted out. Your data has been removed from public listings."}

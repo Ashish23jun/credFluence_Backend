@@ -22,6 +22,7 @@ from app.services.profile_service import build_leaderboard_item
 from app.services.score_engine import ReviewSignals, compute_new_trust_score
 from app.tasks.celery_app import celery_app
 from app.tasks.review_notifications import send_email_task
+from app.tasks.es_sync import sync_profile_to_es
 
 logger = logging.getLogger(__name__)
 
@@ -197,6 +198,8 @@ async def _recalculate_trust_score(profile_id: str) -> None:
             "recalculate_trust_score: profile %s → score=%d reviews=%d",
             profile_id, current_score, len(reviews),
         )
+
+        sync_profile_to_es.delay(profile_id)
 
 
 async def _refresh_leaderboard_cache() -> None:

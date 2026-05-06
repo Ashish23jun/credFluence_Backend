@@ -24,6 +24,7 @@ from app.schemas.onboarding import OrgUpdatePayload, PresignRequest, Verificatio
 from app.services.onboarding_service import build_docs_dict, build_onboarding_context
 from app.services.org_service import approve_membership, reject_membership
 from app.services.storage_service import presign_put
+from app.tasks.es_sync import sync_profile_to_es
 
 router = APIRouter(prefix="/onboarding", tags=["onboarding"])
 
@@ -91,6 +92,9 @@ async def update_org(
 
     await db.commit()
     await cache_delete(user_key(current_user["id"]))
+
+    if profile:
+        sync_profile_to_es.delay(str(profile.id))
 
     return {"success": True, "message": "Organisation updated.", "data": {}}
 

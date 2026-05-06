@@ -15,6 +15,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      elasticsearch:
+        condition: service_healthy
     volumes:
       - ./app:/app/app
       - ./migrations:/app/migrations
@@ -87,9 +89,33 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      elasticsearch:
+        condition: service_healthy
     volumes:
       - ./app:/app/app
     command: celery -A app.tasks.celery_app worker --loglevel=info --concurrency=2
+    networks:
+      - credfluence
+    restart: unless-stopped
+
+  # ──────────────────────────────────────────────
+  # Elasticsearch
+  # ──────────────────────────────────────────────
+  elasticsearch:
+    image: elasticsearch:8.13.4
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=false
+      - ES_JAVA_OPTS=-Xms512m -Xmx512m
+    ports:
+      - "9200:9200"
+    volumes:
+      - es_data:/usr/share/elasticsearch/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -s http://localhost:9200/_cluster/health | grep -q '\"status\":\"green\"\\|\"status\":\"yellow\"'"]
+      interval: 10s
+      timeout: 10s
+      retries: 20
     networks:
       - credfluence
     restart: unless-stopped
@@ -118,6 +144,7 @@ services:
 volumes:
   postgres_data:
   redis_data:
+  es_data:
 
 networks:
   credfluence:

@@ -171,6 +171,18 @@ async def get_leaderboard_profiles(
     return result.scalars().all()
 
 
+async def get_profiles_by_ids(db: AsyncSession, profile_ids: list) -> list[Profile]:
+    """Fetch profiles by a list of UUIDs, eager-loading organization."""
+    if not profile_ids:
+        return []
+    result = await db.execute(
+        select(Profile)
+        .options(selectinload(Profile.organization))
+        .where(Profile.id.in_(profile_ids))
+    )
+    return result.scalars().all()
+
+
 async def get_profile_by_handle(db: AsyncSession, handle: str) -> Profile | None:
     result = await db.execute(
         select(Profile)
