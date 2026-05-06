@@ -9,7 +9,10 @@ from app.core.cache import cache_delete, cache_get, cache_set
 from app.core.database import get_db
 from app.core.dependencies import get_current_user
 from app.models.notification import Notification
-from app.models.review import Review, ReviewEvidence
+from app.models.notification_preference import PREF_CHANNELS, PREF_TYPES
+from app.models.review import ReviewEvidence
+from app.repositories import notification_pref_repo
+from app.schemas.notifications import PrefUpdate
 from app.services.storage_service import presign_get
 
 router = APIRouter(prefix="/notifications", tags=["notifications"])
@@ -64,8 +67,8 @@ async def list_notifications(
             if cursor_dt.tzinfo is None:
                 cursor_dt = cursor_dt.replace(tzinfo=UTC)
             stmt = stmt.where(Notification.created_at < cursor_dt)
-        except ValueError:
-            raise HTTPException(status_code=422, detail="Invalid cursor format — use ISO datetime")
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail="Invalid cursor format — use ISO datetime") from exc
 
     stmt = stmt.order_by(Notification.created_at.desc()).limit(limit)
     result = await db.execute(stmt)
@@ -204,3 +207,40 @@ async def mark_all_read(
     await cache_delete(_unread_key(str(user_id)))
 
     return {"success": True, "message": "All notifications marked as read.", "data": None}
+
+
+# ---------------------------------------------------------------------------
+# GET /notifications/preferences
+# ---------------------------------------------------------------------------
+
+@router.get("/preferences")
+async def get_preferences(
+    db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+) -> dict:
+    user_id = uuid.UUID(current_user["id"])
+    prefs = await notification_pref_repo.get_all_preferences(db, user_id)
+    return {"success": True, "message": "Preferences fetched.", "data": prefs}
+
+
+# ---------------------------------------------------------------------------
+# PATCH /notifications/preferences
+# ---------------------------------------------------------------------------
+
+
+@router.patch("/preferences")
+async def update_preference(
+    payload: PrefUpdate,
+    db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+) -> dict:
+    if payload.channel not in PREF_CHANNELS:
+        raise HTTPException(status_code=422, detail=f"Invalid channel. Must be one of: {', '.join(PREF_CHANNELS)}")
+    if payload.type not in PREF_TYPES:
+        raise HTTPException(status_code=422, detail=f"Invalid type. Must be one of: {', '.join(PREF_TYPES)}")
+
+    user_id = uuid.UUID(current_user["id"])
+    await notification_pref_repo.upsert_preference(
+        db, user_id, payload.channel, payload.type, payload.enabled
+    )
+    return {"success": True, "message": "Preference updated.", "data": None}

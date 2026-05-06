@@ -5,12 +5,10 @@ Endpoints are reachable by any authenticated user regardless of
 onboarding_completed_at or org.verification_status.
 """
 
-import re
 import uuid
 from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from pydantic import BaseModel, field_validator, model_validator
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.cache import cache_delete, user_key
@@ -22,6 +20,7 @@ from app.repositories.org_repo import (
     list_pending_memberships,
 )
 from app.repositories.user_repo import get_user_with_org_and_social
+from app.schemas.onboarding import OrgUpdatePayload, PresignRequest, VerificationDocsPayload
 from app.services.onboarding_service import build_docs_dict, build_onboarding_context
 from app.services.org_service import approve_membership, reject_membership
 from app.services.storage_service import presign_put
@@ -29,57 +28,6 @@ from app.services.storage_service import presign_put
 router = APIRouter(prefix="/onboarding", tags=["onboarding"])
 
 _ALLOWED_MIME = {"image/jpeg", "image/png", "application/pdf"}
-
-
-# ---------------------------------------------------------------------------
-# Schemas
-# ---------------------------------------------------------------------------
-
-class SocialLinkItem(BaseModel):
-    platform: str   # instagram | youtube | linkedin | twitter | facebook | tiktok
-    url: str
-    label: str | None = None  # optional display label e.g. "Main Page", "India"
-
-
-class OrgUpdatePayload(BaseModel):
-    name: str | None = None
-    bio: str | None = None
-    category: str | None = None
-    location: str | None = None
-    avatar_url: str | None = None
-    languages: list[str] | None = None
-    niches: list[str] | None = None
-    social_links: list[SocialLinkItem] | None = None  # agency/brand only
-
-
-_GST_RE = re.compile(r"^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z]{1}[1-9A-Z]{1}Z[0-9A-Z]{1}$")
-
-
-class VerificationDocsPayload(BaseModel):
-    website: str
-    gst_number: str | None = None
-    gst_file_url: str | None = None
-    cin_number: str | None = None
-    cin_file_url: str | None = None
-    trademark_file_url: str | None = None
-
-    @field_validator("gst_number")
-    @classmethod
-    def validate_gst(cls, v: str | None) -> str | None:
-        if v and not _GST_RE.match(v.strip().upper()):
-            raise ValueError("Invalid GST number format (e.g. 27ABCDE1234F1Z5)")
-        return v.strip().upper() if v else v
-
-    @model_validator(mode="after")
-    def gst_required(self) -> "VerificationDocsPayload":
-        if not self.gst_number and not self.gst_file_url:
-            raise ValueError("GST number or GST certificate is required")
-        return self
-
-
-class PresignRequest(BaseModel):
-    filename: str
-    content_type: str
 
 
 # ---------------------------------------------------------------------------

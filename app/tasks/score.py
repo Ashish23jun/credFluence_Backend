@@ -110,7 +110,7 @@ async def _check_dispute_windows() -> None:
                 )
                 db.add(notif)
                 await db.flush()
-                send_email_task.delay("review_live", admin.email, email_kwargs, str(notif.id))
+                send_email_task.delay("review_live", admin.email, email_kwargs, str(notif.id), str(admin.id))
 
             # Notify the reviewer
             if review.reviewer_id:
@@ -129,6 +129,7 @@ async def _check_dispute_windows() -> None:
                         review.reviewer.email,
                         {"target_name": target_name, "review_id": str(review.id), "role": "reviewer"},
                         str(reviewer_notif.id),
+                        str(review.reviewer_id),
                     )
 
             recalculate_trust_score.delay(str(target_profile.id))

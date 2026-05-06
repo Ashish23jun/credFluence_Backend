@@ -12,6 +12,7 @@ import uuid
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
+from app.core.config import settings
 from app.core.database import task_db_session
 from app.core.email import (
     send_dispute_filed_email,
@@ -21,14 +22,13 @@ from app.core.email import (
     send_review_received_email,
     send_review_received_invite_email,
 )
-from app.core.config import settings
 from app.models.notification import Notification
 from app.models.organization_membership import OrganizationMembership
 from app.models.platform_admin import PlatformAdmin
 from app.models.profile import Profile
 from app.models.review import Review
-from app.models.social_account import SocialAccount
 from app.models.user import User
+from app.repositories import notification_pref_repo
 from app.tasks.celery_app import celery_app
 
 _REL_LABEL = {
@@ -67,13 +67,20 @@ def notify_review_verified(review_id: str) -> None:
     retry_backoff=True,
     max_retries=3,
 )
-def send_email_task(kind: str, to_email: str, kwargs: dict, notification_id: str | None = None) -> None:
+def send_email_task(
+    kind: str,
+    to_email: str,
+    kwargs: dict,
+    notification_id: str | None = None,
+    user_id: str | None = None,
+) -> None:
     """Generic email subtask.
 
     `notification_id`: if set, marks `email_sent = True` on the linked
     Notification row after successful delivery.
+    `user_id`: if set, checks the user's email preference before sending.
     """
-    asyncio.run(_dispatch_email(kind, to_email, kwargs, notification_id))
+    asyncio.run(_dispatch_email(kind, to_email, kwargs, notification_id, user_id))
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -188,6 +195,7 @@ async def _notify_review_verified(review_id: str) -> None:
             reviewer.email,
             {"target_name": target_name, "review_id": str(review.id), "role": "reviewer"},
             str(notification.id),
+            str(reviewer.id),
         )
 
         await db.commit()
@@ -272,6 +280,7 @@ async def _handle_on_platform(
             admin.email,
             {"reviewer_name": reviewer_name, "review_id": str(review.id), "snapshot": snapshot},
             str(notification.id),
+            str(admin.id),
         )
 
 
@@ -315,12 +324,29 @@ async def _handle_off_platform(
 # Email dispatcher — routes "kind" → template fn, then marks email_sent in DB
 # ──────────────────────────────────────────────────────────────────────────────
 
+_KIND_TO_PREF: dict[str, tuple[str, str]] = {
+    "review_received":  ("email", "review_received"),
+    "review_live":      ("email", "review_verified"),
+    "dispute_filed":    ("email", "dispute_filed"),
+    "dispute_resolved": ("email", "dispute_resolved"),
+}
+
+
 async def _dispatch_email(
     kind: str,
     to_email: str,
     kwargs: dict,
     notification_id: str | None,
+    user_id: str | None = None,
 ) -> None:
+    if user_id and kind in _KIND_TO_PREF:
+        channel, type_ = _KIND_TO_PREF[kind]
+        async with task_db_session() as db:
+            enabled = await notification_pref_repo.is_enabled(db, uuid.UUID(user_id), channel, type_)
+        if not enabled:
+            logger.info("email suppressed by preference: user=%s kind=%s", user_id, kind)
+            return
+
     if kind == "review_received":
         await send_review_received_email(
             to_email,

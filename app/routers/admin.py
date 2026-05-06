@@ -2,10 +2,9 @@ import uuid
 from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel
 from sqlalchemy import func, select
-from sqlalchemy.orm import selectinload
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from app.core.cache import cache_delete, user_key
 from app.core.database import get_db
@@ -13,20 +12,17 @@ from app.core.dependencies import get_current_platform_admin
 from app.models.dispute import Dispute
 from app.models.notification import Notification
 from app.models.organization import Organization
-from app.models.organization_membership import OrganizationMembership
 from app.models.review import Review
 from app.models.social_account import SocialAccount
 from app.models.user import User
 from app.repositories.org_repo import get_org_by_id, get_org_with_detail, list_orgs_by_status
+from app.schemas.admin import DisputeResolvePayload, OrgRejectPayload, ReviewRejectPayload
 from app.services.admin_service import serialize_org_detail, serialize_org_list_item
 from app.services.storage_service import presign_get
+from app.tasks.review_notifications import send_email_task
 from app.tasks.score import recalculate_trust_score
 
 router = APIRouter(prefix="/admin", tags=["admin"])
-
-
-class OrgRejectPayload(BaseModel):
-    reason: str
 
 
 # ---------------------------------------------------------------------------
@@ -147,15 +143,6 @@ async def reject_org(
 # ---------------------------------------------------------------------------
 # Schemas (reviews + disputes)
 # ---------------------------------------------------------------------------
-
-class ReviewRejectPayload(BaseModel):
-    reason: str
-
-
-class DisputeResolvePayload(BaseModel):
-    outcome: str           # reviewer_won | target_won | mutual_resolution
-    resolution_notes: str = ""
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -519,7 +506,9 @@ async def resolve_dispute(
     serialised = _serialise_dispute(dispute)
 
     reviewer_email = review.reviewer.email if review.reviewer else None
+    reviewer_user_id = str(review.reviewer_id) if review.reviewer_id else None
     filer_email = dispute.filed_by_user.email if dispute.filed_by_user else None
+    filer_user_id = str(dispute.filed_by_user_id)
 
     await db.commit()
 
@@ -528,16 +517,15 @@ async def resolve_dispute(
         recalculate_trust_score.delay(str(review.target_profile_id))
 
     # Emails — notify reviewer and filer (may be the same person, deduplicate)
-    from app.tasks.review_notifications import send_email_task
     email_kwargs = {"case_id": str(dispute.id), "outcome": payload.outcome}
     notified: set[str] = set()
 
     if reviewer_email:
-        send_email_task.delay("dispute_resolved", reviewer_email, email_kwargs)
+        send_email_task.delay("dispute_resolved", reviewer_email, email_kwargs, None, reviewer_user_id)
         notified.add(reviewer_email)
 
     if filer_email and filer_email not in notified:
-        send_email_task.delay("dispute_resolved", filer_email, email_kwargs, str(filer_notif.id))
+        send_email_task.delay("dispute_resolved", filer_email, email_kwargs, str(filer_notif.id), filer_user_id)
 
     return {
         "success": True,

@@ -1,7 +1,6 @@
 from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -21,7 +20,15 @@ from app.core.security import (
 from app.models.profile import Profile
 from app.models.user import User
 from app.repositories.user_repo import get_user_by_email, get_user_with_org_and_memberships
-from app.schemas.auth import LoginRequest, RefreshRequest, RegisterRequest, VerifyEmailRequest
+from app.schemas.auth import (
+    ForgotPasswordRequest,
+    LoginRequest,
+    RefreshRequest,
+    RegisterRequest,
+    ResetPasswordRequest,
+    UpdateMePayload,
+    VerifyEmailRequest,
+)
 from app.services.org_service import resolve_org_for_signup
 from app.services.otp_service import (
     delete_otp,
@@ -241,11 +248,6 @@ async def refresh_token(payload: RefreshRequest, db: AsyncSession = Depends(get_
     }
 
 
-class UpdateMePayload(BaseModel):
-    full_name: str | None = None
-    phone: str | None = None
-
-
 @router.get("/me", response_model=dict)
 async def get_me(
     current_user: dict = Depends(get_current_user),
@@ -290,10 +292,6 @@ async def update_me(
 # POST /auth/forgot-password
 # ---------------------------------------------------------------------------
 
-class ForgotPasswordRequest(BaseModel):
-    email: str
-
-
 @router.post("/forgot-password", response_model=dict)
 async def forgot_password(payload: ForgotPasswordRequest) -> dict:
     otp = generate_otp()
@@ -306,12 +304,6 @@ async def forgot_password(payload: ForgotPasswordRequest) -> dict:
 # ---------------------------------------------------------------------------
 # POST /auth/reset-password
 # ---------------------------------------------------------------------------
-
-class ResetPasswordRequest(BaseModel):
-    email: str
-    otp: str
-    new_password: str
-
 
 @router.post("/reset-password", response_model=dict)
 async def reset_password(payload: ResetPasswordRequest, db: AsyncSession = Depends(get_db)) -> dict:

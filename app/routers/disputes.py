@@ -1,5 +1,4 @@
 from fastapi import APIRouter, Depends, HTTPException, status
-from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
@@ -10,18 +9,13 @@ from app.repositories.dispute_repo import (
     list_disputes_for_org,
     list_disputes_for_user,
 )
+from app.schemas.disputes import DisputeCreatePayload
 from app.services.dispute_service import route_dispute
 
 router = APIRouter(prefix="/disputes", tags=["disputes"])
 
 VALID_TYPES = ("verification", "duplicate_name", "false_claim")
 
-
-class DisputeCreatePayload(BaseModel):
-    review_id: str
-    type: str
-    reason: str
-    target_org_id: str | None = None
 
 
 @router.post("", response_model=dict, status_code=status.HTTP_201_CREATED)

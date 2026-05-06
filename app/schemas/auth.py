@@ -89,3 +89,18 @@ class AuthResponse(BaseModel):
     success: bool = True
     message: str
     data: dict
+
+
+class UpdateMePayload(BaseModel):
+    full_name: str | None = None
+    phone: str | None = None
+
+
+class ForgotPasswordRequest(BaseModel):
+    email: str
+
+
+class ResetPasswordRequest(BaseModel):
+    email: str
+    otp: str
+    new_password: str

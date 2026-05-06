@@ -5,6 +5,7 @@ from app.models.dispute import Dispute
 from app.models.dispute_recipient import DisputeRecipient
 from app.models.fraud_alert import FraudAlert
 from app.models.notification import Notification
+from app.models.notification_preference import NotificationPreference
 from app.models.organization import Organization
 from app.models.organization_domain import OrganizationDomain
 from app.models.organization_membership import OrganizationMembership
@@ -37,6 +38,7 @@ __all__ = [
     "TagAggregation",
     "Badge",
     "Notification",
+    "NotificationPreference",
     "ActivityEvent",
     "FraudAlert",
 ]

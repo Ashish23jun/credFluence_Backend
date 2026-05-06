@@ -5,7 +5,6 @@ import uuid
 from datetime import UTC, date, datetime, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -27,6 +26,7 @@ from app.models.review import (
 )
 from app.models.user import User
 from app.repositories.profile_repo import get_my_reviews_cursor, get_profile_by_handle
+from app.schemas.reviews import EvidencePresignRequest, RecipientDisputePayload, SubmitReviewRequest
 from app.services.storage_service import presign_put
 from app.tasks.review_notifications import (
     notify_review_submitted,
@@ -67,61 +67,6 @@ _VALID_RELATIONSHIPS = {
 # ---------------------------------------------------------------------------
 # Schemas
 # ---------------------------------------------------------------------------
-
-class EvidencePresignRequest(BaseModel):
-    content_type: str
-    evidence_type: str
-
-
-class RatingIn(BaseModel):
-    category: str
-    score: int
-
-
-class PaymentIn(BaseModel):
-    payment_type: str          # advance | milestone | final
-    amount: int                # in smallest unit (paise)
-    currency: str = "INR"
-    status: str = "pending"    # pending | paid | late
-    due_date: str | None = None
-    paid_at: str | None = None
-
-
-class FlagIn(BaseModel):
-    type: str       # payment_not_made | payment_partial | payment_refused | payment_delayed | invoice_disputed | ghosted | missed_deadline | scope_creep | rude_behavior | contract_violation
-    severity: str = "medium"  # low | medium | high
-
-
-class EvidenceIn(BaseModel):
-    type: str
-    file_key: str
-
-
-class OffPlatformTarget(BaseModel):
-    name: str
-    email: str
-    kind: str           # creator | agency | brand
-    youtube_url: str | None = None
-    instagram_handle: str | None = None
-    linkedin_url: str | None = None
-
-
-class SubmitReviewRequest(BaseModel):
-    # Exactly one of these must be set
-    target_profile_handle: str | None = None
-    off_platform: OffPlatformTarget | None = None
-
-    body: str | None = None
-    total_deal_value: int | None = None
-    currency: str = "INR"
-    contact_email: str
-    contact_phone: str | None = None
-    ratings: list[RatingIn] = []
-    payments: list[PaymentIn] = []
-    flags: list[FlagIn] = []
-    tags: list[str] = []
-    evidence: list[EvidenceIn] = []
-
 
 # ---------------------------------------------------------------------------
 # POST /reviews/evidence/presign
@@ -349,9 +294,6 @@ async def submit_review(
 # POST /reviews/{review_id}/accept  — recipient accepts review → goes live
 # ---------------------------------------------------------------------------
 
-class RecipientDisputePayload(BaseModel):
-    reason: str
-    evidence_keys: list[str] = []
 
 
 @router.post("/{review_id}/accept")
@@ -480,11 +422,15 @@ async def dispute_review(
             "dispute_filed",
             reviewer.email,
             {"case_id": case_id, "review_id": str(review.id), "role": "reviewer"},
+            None,
+            str(reviewer.id),
         )
     send_email_task.delay(
         "dispute_filed",
         current_user["email"],
         {"case_id": case_id, "review_id": str(review.id), "role": "target"},
+        None,
+        current_user["id"],
     )
 
     return {
