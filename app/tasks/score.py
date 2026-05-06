@@ -15,6 +15,7 @@ from app.models.profile import Profile
 from app.models.review import Review
 from app.models.score_history import ScoreHistory
 from app.models.user import User
+from app.repositories import notification_pref_repo
 from app.repositories.profile_repo import get_leaderboard_profiles
 from app.repositories.social_account_repo import get_accounts_by_org_ids
 from app.services.profile_service import build_leaderboard_item
@@ -101,34 +102,40 @@ async def _check_dispute_windows() -> None:
             # Notify target org admins — flush each row to get its ID
             email_kwargs = {"target_name": target_name, "review_id": str(review.id), "role": "target"}
             for admin in admins:
-                notif = Notification(
-                    user_id=admin.id,
-                    notification_type="review_verified",
-                    title="A review is now live",
-                    body=f"A review for {target_name} passed the dispute window and is now public.",
-                    extra_data={"review_id": str(review.id)},
-                )
-                db.add(notif)
-                await db.flush()
-                send_email_task.delay("review_live", admin.email, email_kwargs, str(notif.id), str(admin.id))
+                notif_id = None
+                if await notification_pref_repo.is_enabled(db, admin.id, "in_app", "review_verified"):
+                    notif = Notification(
+                        user_id=admin.id,
+                        notification_type="review_verified",
+                        title="A review is now live",
+                        body=f"A review for {target_name} passed the dispute window and is now public.",
+                        extra_data={"review_id": str(review.id)},
+                    )
+                    db.add(notif)
+                    await db.flush()
+                    notif_id = str(notif.id)
+                send_email_task.delay("review_live", admin.email, email_kwargs, notif_id, str(admin.id))
 
             # Notify the reviewer
             if review.reviewer_id:
-                reviewer_notif = Notification(
-                    user_id=review.reviewer_id,
-                    notification_type="review_verified",
-                    title="Your review is now live",
-                    body="The dispute window closed and your review is now publicly visible.",
-                    extra_data={"review_id": str(review.id)},
-                )
-                db.add(reviewer_notif)
-                await db.flush()
+                notif_id = None
+                if await notification_pref_repo.is_enabled(db, review.reviewer_id, "in_app", "review_verified"):
+                    reviewer_notif = Notification(
+                        user_id=review.reviewer_id,
+                        notification_type="review_verified",
+                        title="Your review is now live",
+                        body="The dispute window closed and your review is now publicly visible.",
+                        extra_data={"review_id": str(review.id)},
+                    )
+                    db.add(reviewer_notif)
+                    await db.flush()
+                    notif_id = str(reviewer_notif.id)
                 if review.reviewer and review.reviewer.email:
                     send_email_task.delay(
                         "review_live",
                         review.reviewer.email,
                         {"target_name": target_name, "review_id": str(review.id), "role": "reviewer"},
-                        str(reviewer_notif.id),
+                        notif_id,
                         str(review.reviewer_id),
                     )
 

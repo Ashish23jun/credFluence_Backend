@@ -15,6 +15,7 @@ from app.models.organization import Organization
 from app.models.review import Review
 from app.models.social_account import SocialAccount
 from app.models.user import User
+from app.repositories import notification_pref_repo
 from app.repositories.org_repo import get_org_by_id, get_org_with_detail, list_orgs_by_status
 from app.schemas.admin import DisputeResolvePayload, OrgRejectPayload, ReviewRejectPayload
 from app.services.admin_service import serialize_org_detail, serialize_org_list_item
@@ -489,17 +490,18 @@ async def resolve_dispute(
     dispute.resolved_by_admin_id = uuid.UUID(current_admin["id"])
     dispute.resolved_at = now
 
-    # In-app notification for the person who filed the dispute
-    # Flush immediately to get the ID before dispatching the email task
-    filer_notif = Notification(
-        user_id=dispute.filed_by_user_id,
-        notification_type="dispute_resolved",
-        title="Your dispute has been resolved",
-        body=f"Outcome: {payload.outcome.replace('_', ' ').title()}." + (f" {payload.resolution_notes[:120]}" if payload.resolution_notes else ""),
-        extra_data={"dispute_id": str(dispute.id), "outcome": payload.outcome},
-    )
-    db.add(filer_notif)
-    await db.flush()
+    filer_notif_id = None
+    if await notification_pref_repo.is_enabled(db, dispute.filed_by_user_id, "in_app", "dispute_resolved"):
+        filer_notif = Notification(
+            user_id=dispute.filed_by_user_id,
+            notification_type="dispute_resolved",
+            title="Your dispute has been resolved",
+            body=f"Outcome: {payload.outcome.replace('_', ' ').title()}." + (f" {payload.resolution_notes[:120]}" if payload.resolution_notes else ""),
+            extra_data={"dispute_id": str(dispute.id), "outcome": payload.outcome},
+        )
+        db.add(filer_notif)
+        await db.flush()
+        filer_notif_id = str(filer_notif.id)
 
     # Serialize before commit — post-commit SQLAlchemy expires all objects,
     # causing MissingGreenlet if relationship attributes are accessed lazily.
@@ -525,7 +527,7 @@ async def resolve_dispute(
         notified.add(reviewer_email)
 
     if filer_email and filer_email not in notified:
-        send_email_task.delay("dispute_resolved", filer_email, email_kwargs, str(filer_notif.id), filer_user_id)
+        send_email_task.delay("dispute_resolved", filer_email, email_kwargs, filer_notif_id, filer_user_id)
 
     return {
         "success": True,

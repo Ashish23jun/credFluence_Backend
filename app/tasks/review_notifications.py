@@ -180,21 +180,24 @@ async def _notify_review_verified(review_id: str) -> None:
             else "the profile"
         )
 
-        notification = Notification(
-            user_id=reviewer.id,
-            notification_type="review_verified",
-            title="Your review is now live",
-            body=f"Your review for {target_name} has been accepted and is now publicly visible.",
-            extra_data={"review_id": str(review.id), "target_name": target_name},
-        )
-        db.add(notification)
-        await db.flush()
+        notif_id = None
+        if await notification_pref_repo.is_enabled(db, reviewer.id, "in_app", "review_verified"):
+            notification = Notification(
+                user_id=reviewer.id,
+                notification_type="review_verified",
+                title="Your review is now live",
+                body=f"Your review for {target_name} has been accepted and is now publicly visible.",
+                extra_data={"review_id": str(review.id), "target_name": target_name},
+            )
+            db.add(notification)
+            await db.flush()
+            notif_id = str(notification.id)
 
         send_email_task.delay(
             "review_live",
             reviewer.email,
             {"target_name": target_name, "review_id": str(review.id), "role": "reviewer"},
-            str(notification.id),
+            notif_id,
             str(reviewer.id),
         )
 
@@ -265,21 +268,24 @@ async def _handle_on_platform(
     summary = snapshot.get("body", "")[:120] or "No written comment."
 
     for admin in admins:
-        notification = Notification(
-            user_id=admin.id,
-            notification_type="review_received",
-            title="You received a new review",
-            body=f"{reviewer_name} left a review for your organisation. {summary}",
-            extra_data=snapshot,   # full snapshot stored — frontend modal can render all of it
-        )
-        db.add(notification)
-        await db.flush()
+        notif_id = None
+        if await notification_pref_repo.is_enabled(db, admin.id, "in_app", "review_received"):
+            notification = Notification(
+                user_id=admin.id,
+                notification_type="review_received",
+                title="You received a new review",
+                body=f"{reviewer_name} left a review for your organisation. {summary}",
+                extra_data=snapshot,
+            )
+            db.add(notification)
+            await db.flush()
+            notif_id = str(notification.id)
 
         send_email_task.delay(
             "review_received",
             admin.email,
             {"reviewer_name": reviewer_name, "review_id": str(review.id), "snapshot": snapshot},
-            str(notification.id),
+            notif_id,
             str(admin.id),
         )
 
