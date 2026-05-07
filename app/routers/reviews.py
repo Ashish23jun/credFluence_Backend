@@ -30,7 +30,13 @@ from app.models.review import (
 )
 from app.models.user import User
 from app.repositories.profile_repo import get_my_reviews_cursor, get_profile_by_handle
-from app.schemas.reviews import CommentIn, EvidencePresignRequest, RecipientDisputePayload, ReplyIn, SubmitReviewRequest
+from app.schemas.reviews import (
+    CommentIn,
+    EvidencePresignRequest,
+    RecipientDisputePayload,
+    ReplyIn,
+    SubmitReviewRequest,
+)
 from app.services.profile_service import _reviewer_primary_social
 from app.services.storage_service import presign_put
 from app.tasks.review_notifications import (

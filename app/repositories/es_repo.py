@@ -10,7 +10,7 @@ Responsibilities:
 import logging
 from typing import Any
 
-from elasticsearch import NotFoundError, BadRequestError
+from elasticsearch import BadRequestError, NotFoundError
 
 from app.core.elastic import PROFILES_INDEX, get_es
 

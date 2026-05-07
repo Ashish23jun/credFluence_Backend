@@ -21,8 +21,8 @@ from app.repositories.social_account_repo import get_accounts_by_org_ids
 from app.services.profile_service import build_leaderboard_item
 from app.services.score_engine import ReviewSignals, compute_new_trust_score
 from app.tasks.celery_app import celery_app
-from app.tasks.review_notifications import send_email_task
 from app.tasks.es_sync import sync_profile_to_es
+from app.tasks.review_notifications import send_email_task
 
 logger = logging.getLogger(__name__)
 

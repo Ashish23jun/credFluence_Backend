@@ -2,8 +2,16 @@ import uuid
 from datetime import UTC, datetime
 
 from sqlalchemy import (
-    Boolean, CheckConstraint, Date, DateTime, Enum, ForeignKey,
-    Integer, String, Text, UniqueConstraint,
+    Boolean,
+    CheckConstraint,
+    Date,
+    DateTime,
+    Enum,
+    ForeignKey,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
 )
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship

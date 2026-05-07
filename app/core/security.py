@@ -9,7 +9,6 @@ from jose import JWTError, jwt
 
 from app.core.config import settings
 
-
 # ---------------------------------------------------------------------------
 # Password hashing (bcrypt directly — passlib has compatibility issues with bcrypt 4.x)
 # Bcrypt is CPU-bound (~300ms). Run in thread pool to avoid blocking event loop.

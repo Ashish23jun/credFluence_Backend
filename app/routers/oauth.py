@@ -37,7 +37,6 @@ from app.models.profile import Profile
 from app.models.user import User
 from app.repositories.social_account_repo import get_accounts_by_user_id, upsert_social_account
 from app.repositories.user_repo import get_user_by_email, get_user_by_google_id, get_user_with_org
-from app.services.org_service import resolve_org_for_signup
 from app.services.oauth_service import (
     auth_redirect,
     build_instagram_stats,
@@ -45,6 +44,7 @@ from app.services.oauth_service import (
     connect_redirect,
     maybe_verify_creator,
 )
+from app.services.org_service import resolve_org_for_signup
 
 router = APIRouter(prefix="/auth", tags=["oauth"])
 

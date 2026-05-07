@@ -86,6 +86,9 @@ class Settings(BaseSettings):
     # Frontend URL (for OAuth redirects)
     frontend_url: str = "http://localhost:5173"
 
+    # Public base URL of this API — used for OG image URLs in share cards
+    og_base_url: str = "http://localhost:8000"
+
     # CORS — comma-separated string in .env: http://localhost:5173,http://localhost:3000
     allowed_origins: str = "http://localhost:5173,http://localhost:3000"
 

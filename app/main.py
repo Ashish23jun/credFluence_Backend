@@ -1,13 +1,34 @@
+import boto3
 import sentry_sdk
 import structlog
+from botocore.config import Config
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import JSONResponse
+from sqlalchemy import text
 
 from app.core.config import settings
+from app.core.database import engine
+from app.core.elastic import close_es
+from app.core.http_client import close_http_client
 from app.core.logging import configure_logging
 from app.core.middleware import LoggingMiddleware, RateLimitMiddleware, global_exception_handler
+from app.core.redis import close_redis, get_redis
+from app.repositories import es_repo
+from app.routers import (
+    admin,
+    admin_auth,
+    auth,
+    claim,
+    disputes,
+    notifications,
+    oauth,
+    og,
+    onboarding,
+    profiles,
+    reviews,
+)
 
 # Configure logging first
 configure_logging(debug=settings.debug)
@@ -49,7 +70,6 @@ app.add_exception_handler(Exception, global_exception_handler)
 # ---------------------------------------------------------------------------
 # Routers
 # ---------------------------------------------------------------------------
-from app.routers import admin, admin_auth, auth, claim, disputes, notifications, oauth, onboarding, profiles, reviews
 
 app.include_router(auth.router)
 app.include_router(oauth.router)
@@ -61,6 +81,7 @@ app.include_router(claim.router)
 app.include_router(admin_auth.router)
 app.include_router(admin.router)
 app.include_router(notifications.router)
+app.include_router(og.router)
 
 
 # ---------------------------------------------------------------------------
@@ -69,20 +90,15 @@ app.include_router(notifications.router)
 
 @app.get("/health", tags=["system"])
 async def health_check() -> dict:
-    from app.core.database import engine
-    from app.core.redis import get_redis
-
     checks: dict[str, str] = {}
 
-    # Database
     try:
         async with engine.connect() as conn:
-            await conn.execute(__import__("sqlalchemy").text("SELECT 1"))
+            await conn.execute(text("SELECT 1"))
         checks["database"] = "ok"
     except Exception as e:
         checks["database"] = f"error: {e}"
 
-    # Redis
     try:
         redis = await get_redis()
         await redis.ping()
@@ -90,11 +106,7 @@ async def health_check() -> dict:
     except Exception as e:
         checks["redis"] = f"error: {e}"
 
-    # AWS S3
     try:
-        import boto3
-        from botocore.config import Config
-
         client_kwargs: dict = {
             "aws_access_key_id": settings.s3_access_key,
             "aws_secret_access_key": settings.s3_secret_key,
@@ -120,7 +132,6 @@ async def health_check() -> dict:
 
 @app.on_event("startup")
 async def startup() -> None:
-    from app.repositories import es_repo
     logger.info("credfluence_api_starting", env=settings.app_env)
     try:
         await es_repo.ensure_index()
@@ -130,9 +141,6 @@ async def startup() -> None:
 
 @app.on_event("shutdown")
 async def shutdown() -> None:
-    from app.core.elastic import close_es
-    from app.core.http_client import close_http_client
-    from app.core.redis import close_redis
     await close_http_client()
     await close_redis()
     await close_es()
