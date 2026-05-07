@@ -28,3 +28,10 @@ async def close_es() -> None:
     if _es_client is not None:
         await _es_client.close()
         _es_client = None
+
+
+def reset_es() -> None:
+    """Force-drop the client reference without closing — used by Celery tasks
+    before asyncio.run() so a fresh client is created on the new event loop."""
+    global _es_client
+    _es_client = None

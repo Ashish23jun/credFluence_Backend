@@ -80,6 +80,7 @@ async def list_profiles(
                 sort=sort,
             )
             if es_hits:
+                logger.info("search '%s' → ES (%d hits)", search_query, total)
                 # ES returned results — fetch full profile data from Postgres
                 # using the profile_ids ES gave us (preserving ES rank order)
                 profile_ids_ordered = [_uuid.UUID(h["profile_id"]) for h in es_hits]
@@ -107,8 +108,8 @@ async def list_profiles(
                     "items": items, "total": total, "page": page, "limit": limit,
                     "pages": -(-total // limit),
                 }}
-        except Exception:
-            logger.warning("Elasticsearch unavailable, falling back to Postgres search")
+        except Exception as e:
+            logger.warning("Elasticsearch unavailable (%s), falling back to Postgres search", e)
 
     # ── Postgres path (no search query, or ES fallback) ───────────────────────
     filters = [
@@ -294,8 +295,9 @@ async def get_profile_reviews(
         db, filters, offset=(page - 1) * limit, limit=limit
     )
 
+    current_user_id = current_user["id"] if current_user else None
     return {"success": True, "message": "OK", "data": {
-        "items": [profile_service.build_review_item(r) for r in reviews],
+        "items": [profile_service.build_review_item(r, current_user_id) for r in reviews],
         "total": total,
         "page": page,
         "limit": limit,

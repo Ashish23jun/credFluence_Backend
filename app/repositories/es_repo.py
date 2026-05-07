@@ -10,7 +10,7 @@ Responsibilities:
 import logging
 from typing import Any
 
-from elasticsearch import NotFoundError
+from elasticsearch import NotFoundError, BadRequestError
 
 from app.core.elastic import PROFILES_INDEX, get_es
 
@@ -30,10 +30,16 @@ _MAPPING = {
         "number_of_shards": 1,
         "number_of_replicas": 0,
         "analysis": {
+            "tokenizer": {
+                "handle_tokenizer": {
+                    "type": "pattern",
+                    "pattern": "[^a-zA-Z0-9]",
+                },
+            },
             "analyzer": {
                 "handle_analyzer": {
                     "type": "custom",
-                    "tokenizer": "standard",
+                    "tokenizer": "handle_tokenizer",
                     "filter": ["lowercase", "asciifolding"],
                 }
             }
@@ -43,9 +49,10 @@ _MAPPING = {
         "properties": {
             "profile_id":      {"type": "keyword"},
             "handle":          {"type": "text", "analyzer": "handle_analyzer", "fields": {"keyword": {"type": "keyword"}}},
-            "display_name":    {"type": "text", "analyzer": "standard", "boost": 2},
+            "display_name":    {"type": "text", "analyzer": "standard"},
             "org_name":        {"type": "text", "analyzer": "standard"},
             "bio":             {"type": "text", "analyzer": "standard"},
+            "social_handles":  {"type": "text", "analyzer": "handle_analyzer"},
             "profile_type":    {"type": "keyword"},
             "category":        {"type": "keyword"},
             "niches":          {"type": "keyword"},
@@ -67,12 +74,14 @@ _MAPPING = {
 async def ensure_index() -> None:
     """Called on app startup — creates the index if it doesn't exist yet."""
     es = get_es()
-    exists = await es.indices.exists(index=PROFILES_INDEX)
-    if not exists:
-        await es.indices.create(index=PROFILES_INDEX, body=_MAPPING)
-        logger.info("Created Elasticsearch index: %s", PROFILES_INDEX)
-    else:
+    try:
+        await es.indices.get(index=PROFILES_INDEX)
         logger.debug("Elasticsearch index already exists: %s", PROFILES_INDEX)
+        return
+    except NotFoundError:
+        pass
+    await es.indices.create(index=PROFILES_INDEX, body=_MAPPING)
+    logger.info("Created Elasticsearch index: %s", PROFILES_INDEX)
 
 
 def _build_doc(profile_data: dict) -> dict:
@@ -83,6 +92,7 @@ def _build_doc(profile_data: dict) -> dict:
         "display_name":     profile_data.get("display_name") or "",
         "org_name":         profile_data.get("org_name") or "",
         "bio":              profile_data.get("bio") or "",
+        "social_handles":   profile_data.get("social_handles") or [],
         "profile_type":     profile_data.get("profile_type") or "",
         "category":         profile_data.get("category") or "",
         "niches":           profile_data.get("niches") or [],
@@ -152,7 +162,7 @@ async def search_profiles(
                 {
                     "multi_match": {
                         "query": q,
-                        "fields": ["handle^3", "display_name^2", "org_name^2", "bio"],
+                        "fields": ["handle^3", "social_handles^3", "display_name^2", "org_name^2", "bio"],
                         "type": "best_fields",
                         "fuzziness": "AUTO",   # handles typos automatically
                         "prefix_length": 2,    # first 2 chars must match exactly
@@ -164,10 +174,11 @@ async def search_profiles(
     }
 
     # ── sort ──────────────────────────────────────────────────────────────────
+    # For text search, relevance (_score) always leads; trust_score is secondary
+    # so that "mortal" finds ig_mortal before a higher-scored "Mondal" profile.
+    # Explicit sort overrides (review_count, followers_desc, newest) still apply.
     sort_clause: list[dict] = []
-    if sort == "trust_desc":
-        sort_clause = [{"trust_score": "desc"}, "_score"]
-    elif sort == "trust_asc":
+    if sort == "trust_asc":
         sort_clause = [{"trust_score": "asc"}, "_score"]
     elif sort == "review_count":
         sort_clause = [{"review_count": "desc"}, "_score"]
@@ -176,6 +187,7 @@ async def search_profiles(
     elif sort == "newest":
         sort_clause = [{"created_at": "desc"}, "_score"]
     else:
+        # trust_desc (default) and unknown — relevance first, trust breaks ties
         sort_clause = ["_score", {"trust_score": "desc"}]
 
     response = await es.search(

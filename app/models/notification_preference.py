@@ -17,6 +17,7 @@ PREF_TYPES = (
     "profile_claimed",
     "score_updated",
     "badge_earned",
+    "comment_reply",
 )
 
 

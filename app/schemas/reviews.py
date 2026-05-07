@@ -59,3 +59,11 @@ class SubmitReviewRequest(BaseModel):
 class RecipientDisputePayload(BaseModel):
     reason: str
     evidence_keys: list[str] = []
+
+
+class CommentIn(BaseModel):
+    body: str
+
+
+class ReplyIn(BaseModel):
+    body: str

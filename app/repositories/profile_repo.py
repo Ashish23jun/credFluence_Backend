@@ -5,7 +5,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.models.profile import Profile
-from app.models.review import Review, ReviewRating
+from app.models.review import Review, ReviewComment, ReviewRating
 from app.models.tag_aggregation import TagAggregation
 from app.models.user import User
 
@@ -248,6 +248,9 @@ async def get_reviews_page(
             selectinload(Review.ratings),
             selectinload(Review.payments),
             selectinload(Review.tags),
+            selectinload(Review.likes),
+            selectinload(Review.reply),
+            selectinload(Review.comments).selectinload(ReviewComment.likes),
         )
         .where(*filters)
         .order_by(Review.created_at.desc())

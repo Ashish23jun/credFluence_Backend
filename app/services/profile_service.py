@@ -166,13 +166,18 @@ def _reviewer_primary_social(social_accounts: list) -> dict:
     return {"platform": platform, "handle": handle, "followers": followers}
 
 
-def build_review_item(review) -> dict:
+def build_review_item(review, current_user_id: str | None = None) -> dict:
     reviewer_org = review.reviewer.organization if review.reviewer else None
     scores = [r.score for r in review.ratings] if review.ratings else []
     avg = round(sum(scores) / len(scores), 2) if scores else None
     social = _reviewer_primary_social(
         getattr(review.reviewer, "social_accounts", []) or []
     ) if review.reviewer else {}
+
+    likes = getattr(review, "likes", []) or []
+    top_comments = [c for c in (getattr(review, "comments", []) or []) if c.parent_comment_id is None and c.status == "active"]
+    official_reply = getattr(review, "reply", None)
+
     return {
         "id": str(review.id),
         "relationship_type": review.relationship_type,
@@ -185,6 +190,13 @@ def build_review_item(review) -> dict:
         "tags": [t.tag for t in (review.tags or [])],
         "status": review.status,
         "created_at": review.created_at.isoformat(),
+        "like_count": len(likes),
+        "liked_by_me": any(str(lk.user_id) == current_user_id for lk in likes) if current_user_id else False,
+        "comment_count": len(top_comments),
+        "official_reply": {
+            "body": official_reply.body,
+            "updated_at": official_reply.updated_at.isoformat(),
+        } if official_reply else None,
         "reviewer": {
             "org_name": reviewer_org.name if reviewer_org else None,
             "org_type": reviewer_org.org_type if reviewer_org else None,

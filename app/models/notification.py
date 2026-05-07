@@ -29,6 +29,7 @@ class Notification(Base):
             "profile_claimed",
             "score_updated",
             "badge_earned",
+            "comment_reply",
             name="notification_type",
         ),
         nullable=False,

@@ -143,7 +143,11 @@ class Review(Base):
         "ReviewLike", back_populates="review", cascade="all, delete-orphan"
     )
     comments: Mapped[list["ReviewComment"]] = relationship(
-        "ReviewComment", back_populates="review", cascade="all, delete-orphan"
+        "ReviewComment", back_populates="review", cascade="all, delete-orphan",
+        foreign_keys="ReviewComment.review_id",
+    )
+    reply: Mapped["ReviewReply | None"] = relationship(
+        "ReviewReply", back_populates="review", uselist=False, cascade="all, delete-orphan"
     )
 
 
@@ -356,5 +360,77 @@ class ReviewComment(Base):
         nullable=False,
     )
 
-    review: Mapped["Review"] = relationship("Review", back_populates="comments")
+    parent_comment_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("review_comments.id", ondelete="CASCADE"),
+        nullable=True, index=True,
+    )
+
+    review: Mapped["Review"] = relationship(
+        "Review", back_populates="comments", foreign_keys=[review_id]
+    )
     author: Mapped["User"] = relationship("User", foreign_keys=[author_id])
+    parent_comment: Mapped["ReviewComment | None"] = relationship(
+        "ReviewComment", foreign_keys=[parent_comment_id], remote_side="ReviewComment.id",
+        back_populates="replies",
+    )
+    replies: Mapped[list["ReviewComment"]] = relationship(
+        "ReviewComment", foreign_keys="ReviewComment.parent_comment_id",
+        back_populates="parent_comment",
+        cascade="all, delete-orphan",
+    )
+    likes: Mapped[list["CommentLike"]] = relationship(
+        "CommentLike", back_populates="comment", cascade="all, delete-orphan"
+    )
+
+
+class ReviewReply(Base):
+    __tablename__ = "review_replies"
+    __table_args__ = (
+        UniqueConstraint("review_id", "org_id", name="uq_review_reply"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    review_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("reviews.id", ondelete="CASCADE"),
+        nullable=False, index=True,
+    )
+    org_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("organizations.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    body: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(UTC), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(UTC),
+        onupdate=lambda: datetime.now(UTC),
+        nullable=False,
+    )
+
+    review: Mapped["Review"] = relationship("Review", back_populates="reply")
+    org: Mapped["Organization"] = relationship("Organization")
+
+
+class CommentLike(Base):
+    __tablename__ = "comment_likes"
+    __table_args__ = (
+        UniqueConstraint("comment_id", "user_id", name="uq_comment_like"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    comment_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("review_comments.id", ondelete="CASCADE"),
+        nullable=False, index=True,
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(UTC), nullable=False
+    )
+
+    comment: Mapped["ReviewComment"] = relationship("ReviewComment", back_populates="likes")
+    user: Mapped["User"] = relationship("User")

@@ -5,30 +5,36 @@ import uuid
 from datetime import UTC, date, datetime, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.core.database import get_db
-from app.core.dependencies import get_current_user, require_onboarded
+from app.core.dependencies import get_current_user, get_optional_user, require_onboarded
 from app.models.dispute import Dispute
 from app.models.dispute_recipient import DisputeRecipient
 from app.models.notification import Notification
 from app.models.organization import Organization
 from app.models.profile import Profile
 from app.models.review import (
+    CommentLike,
     Review,
+    ReviewComment,
     ReviewEvidence,
     ReviewFlag,
+    ReviewLike,
     ReviewPayment,
     ReviewRating,
+    ReviewReply,
     ReviewTag,
 )
 from app.models.user import User
 from app.repositories.profile_repo import get_my_reviews_cursor, get_profile_by_handle
-from app.schemas.reviews import EvidencePresignRequest, RecipientDisputePayload, SubmitReviewRequest
+from app.schemas.reviews import CommentIn, EvidencePresignRequest, RecipientDisputePayload, ReplyIn, SubmitReviewRequest
+from app.services.profile_service import _reviewer_primary_social
 from app.services.storage_service import presign_put
 from app.tasks.review_notifications import (
+    notify_comment_reply,
     notify_review_submitted,
     notify_review_verified,
     send_email_task,
@@ -438,6 +444,247 @@ async def dispute_review(
         "message": "Dispute filed. Platform admins will review and mediate within 48 hours.",
         "data": {"dispute_id": str(dispute.id), "case_id": case_id},
     }
+
+
+# ---------------------------------------------------------------------------
+# POST /reviews/{review_id}/like  — toggle like on a review
+# ---------------------------------------------------------------------------
+
+@router.post("/{review_id}/like")
+async def toggle_review_like(
+    review_id: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+) -> dict:
+    rid = uuid.UUID(review_id)
+    uid = uuid.UUID(current_user["id"])
+
+    review = await db.get(Review, rid)
+    if not review or review.status != "verified":
+        raise HTTPException(status_code=404, detail="Review not found")
+
+    existing = (await db.execute(
+        select(ReviewLike).where(ReviewLike.review_id == rid, ReviewLike.user_id == uid)
+    )).scalar_one_or_none()
+
+    if existing:
+        await db.delete(existing)
+        liked = False
+    else:
+        db.add(ReviewLike(review_id=rid, user_id=uid))
+        liked = True
+
+    await db.commit()
+    return {"success": True, "message": "OK", "data": {"liked": liked}}
+
+
+# ---------------------------------------------------------------------------
+# GET /reviews/{review_id}/comments  — paginated comments with replies
+# ---------------------------------------------------------------------------
+
+@router.get("/{review_id}/comments")
+async def get_review_comments(
+    review_id: str,
+    page: int = 1,
+    limit: int = 20,
+    db: AsyncSession = Depends(get_db),
+    current_user: dict | None = Depends(get_optional_user),
+) -> dict:
+    rid = uuid.UUID(review_id)
+    uid = uuid.UUID(current_user["id"]) if current_user else None
+    offset = (page - 1) * limit
+
+    # Top-level comments only (no parent)
+    total = (await db.execute(
+        select(func.count(ReviewComment.id))
+        .where(ReviewComment.review_id == rid, ReviewComment.parent_comment_id.is_(None), ReviewComment.status == "active")
+    )).scalar_one()
+
+    result = await db.execute(
+        select(ReviewComment)
+        .where(ReviewComment.review_id == rid, ReviewComment.parent_comment_id.is_(None), ReviewComment.status == "active")
+        .options(
+            selectinload(ReviewComment.author).selectinload(User.social_accounts),
+            selectinload(ReviewComment.likes),
+            selectinload(ReviewComment.replies).selectinload(ReviewComment.author).selectinload(User.social_accounts),
+            selectinload(ReviewComment.replies).selectinload(ReviewComment.likes),
+        )
+        .order_by(ReviewComment.created_at.asc())
+        .offset(offset).limit(limit)
+    )
+    comments = result.scalars().all()
+
+    def _ser_comment(c: ReviewComment, current_uid) -> dict:
+        author = None
+        if c.author:
+            social = _reviewer_primary_social(
+                getattr(c.author, "social_accounts", None) or []
+            )
+            author = {
+                "id": str(c.author.id),
+                "name": c.author.full_name or c.author.email,
+                "social": social or None,
+            }
+        return {
+            "id": str(c.id),
+            "body": c.body,
+            "like_count": len(c.likes),
+            "liked_by_me": any(lk.user_id == current_uid for lk in c.likes) if current_uid else False,
+            "created_at": c.created_at.isoformat(),
+            "author": author,
+            "replies": [_ser_comment(r, current_uid) for r in (c.replies or []) if r.status == "active"],
+        }
+
+    return {"success": True, "message": "OK", "data": {
+        "items": [_ser_comment(c, uid) for c in comments],
+        "total": total, "page": page, "limit": limit, "pages": -(-total // limit),
+    }}
+
+
+# ---------------------------------------------------------------------------
+# POST /reviews/{review_id}/comments  — add a top-level comment
+# ---------------------------------------------------------------------------
+
+@router.post("/{review_id}/comments")
+async def add_review_comment(
+    review_id: str,
+    payload: CommentIn,
+    db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+) -> dict:
+    rid = uuid.UUID(review_id)
+    review = await db.get(Review, rid)
+    if not review or review.status != "verified":
+        raise HTTPException(status_code=404, detail="Review not found")
+
+    if not payload.body.strip():
+        raise HTTPException(status_code=422, detail="Comment body cannot be empty")
+
+    comment = ReviewComment(
+        review_id=rid,
+        author_id=uuid.UUID(current_user["id"]),
+        body=payload.body.strip()[:2000],
+    )
+    db.add(comment)
+    await db.commit()
+    await db.refresh(comment)
+
+    return {"success": True, "message": "Comment added.", "data": {"id": str(comment.id)}}
+
+
+# ---------------------------------------------------------------------------
+# POST /reviews/{review_id}/comments/{comment_id}/like  — toggle comment like
+# ---------------------------------------------------------------------------
+
+@router.post("/{review_id}/comments/{comment_id}/like")
+async def toggle_comment_like(
+    review_id: str,
+    comment_id: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+) -> dict:
+    cid = uuid.UUID(comment_id)
+    uid = uuid.UUID(current_user["id"])
+
+    comment = await db.get(ReviewComment, cid)
+    if not comment or str(comment.review_id) != review_id or comment.status != "active":
+        raise HTTPException(status_code=404, detail="Comment not found")
+
+    existing = (await db.execute(
+        select(CommentLike).where(CommentLike.comment_id == cid, CommentLike.user_id == uid)
+    )).scalar_one_or_none()
+
+    if existing:
+        await db.delete(existing)
+        liked = False
+    else:
+        db.add(CommentLike(comment_id=cid, user_id=uid))
+        liked = True
+
+    await db.commit()
+    return {"success": True, "message": "OK", "data": {"liked": liked}}
+
+
+# ---------------------------------------------------------------------------
+# POST /reviews/{review_id}/comments/{comment_id}/reply  — reply to a comment
+# ---------------------------------------------------------------------------
+
+@router.post("/{review_id}/comments/{comment_id}/reply")
+async def reply_to_comment(
+    review_id: str,
+    comment_id: str,
+    payload: CommentIn,
+    db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+) -> dict:
+    cid = uuid.UUID(comment_id)
+    rid = uuid.UUID(review_id)
+
+    comment = await db.get(ReviewComment, cid)
+    if not comment or str(comment.review_id) != review_id or comment.status != "active":
+        raise HTTPException(status_code=404, detail="Comment not found")
+
+    if comment.parent_comment_id is not None:
+        raise HTTPException(status_code=422, detail="Cannot reply to a reply")
+
+    if not payload.body.strip():
+        raise HTTPException(status_code=422, detail="Reply body cannot be empty")
+
+    reply = ReviewComment(
+        review_id=rid,
+        author_id=uuid.UUID(current_user["id"]),
+        body=payload.body.strip()[:2000],
+        parent_comment_id=cid,
+    )
+    db.add(reply)
+    await db.commit()
+    await db.refresh(reply)
+
+    notify_comment_reply.delay(str(reply.id))
+
+    return {"success": True, "message": "Reply added.", "data": {"id": str(reply.id)}}
+
+
+# ---------------------------------------------------------------------------
+# POST /reviews/{review_id}/reply  — official org response (1 per review)
+# ---------------------------------------------------------------------------
+
+@router.post("/{review_id}/reply")
+async def post_official_reply(
+    review_id: str,
+    payload: ReplyIn,
+    db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(require_onboarded),
+) -> dict:
+    rid = uuid.UUID(review_id)
+    org_id = uuid.UUID(current_user["org"]["id"])
+
+    review = (await db.execute(
+        select(Review).options(selectinload(Review.target_profile))
+        .where(Review.id == rid)
+    )).scalar_one_or_none()
+
+    if not review or review.status != "verified":
+        raise HTTPException(status_code=404, detail="Review not found")
+
+    if str(review.target_profile.organization_id) != str(org_id):
+        raise HTTPException(status_code=403, detail="Only the reviewed organisation can post an official reply")
+
+    existing = (await db.execute(
+        select(ReviewReply).where(ReviewReply.review_id == rid, ReviewReply.org_id == org_id)
+    )).scalar_one_or_none()
+
+    if not payload.body.strip():
+        raise HTTPException(status_code=422, detail="Reply body cannot be empty")
+
+    if existing:
+        existing.body = payload.body.strip()[:2000]
+        existing.updated_at = datetime.now(UTC)
+    else:
+        db.add(ReviewReply(review_id=rid, org_id=org_id, body=payload.body.strip()[:2000]))
+
+    await db.commit()
+    return {"success": True, "message": "Official reply saved.", "data": {}}
 
 
 # ---------------------------------------------------------------------------

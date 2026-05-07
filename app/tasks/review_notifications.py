@@ -26,7 +26,7 @@ from app.models.notification import Notification
 from app.models.organization_membership import OrganizationMembership
 from app.models.platform_admin import PlatformAdmin
 from app.models.profile import Profile
-from app.models.review import Review
+from app.models.review import Review, ReviewComment
 from app.models.user import User
 from app.repositories import notification_pref_repo
 from app.tasks.celery_app import celery_app
@@ -387,3 +387,99 @@ async def _dispatch_email(
             if notif:
                 notif.email_sent = True
                 await db.commit()
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Comment reply notifications
+# ──────────────────────────────────────────────────────────────────────────────
+
+@celery_app.task(
+    name="app.tasks.review_notifications.notify_comment_reply",
+    autoretry_for=(Exception,),
+    max_retries=3,
+    default_retry_delay=30,
+)
+def notify_comment_reply(reply_id: str) -> None:
+    asyncio.run(_notify_comment_reply(reply_id))
+
+
+async def _notify_comment_reply(reply_id: str) -> None:
+    async with task_db_session() as db:
+        # Load reply with its parent comment (+ parent author) and the review's target profile
+        reply = await db.scalar(
+            select(ReviewComment)
+            .where(ReviewComment.id == uuid.UUID(reply_id))
+            .options(
+                selectinload(ReviewComment.author),
+                selectinload(ReviewComment.parent_comment).selectinload(ReviewComment.author),
+            )
+        )
+        if not reply or not reply.parent_comment_id:
+            return
+
+        # Load review → target profile → org
+        review = await db.scalar(
+            select(Review)
+            .where(Review.id == reply.review_id)
+            .options(
+                selectinload(Review.target_profile).selectinload(Profile.organization),
+            )
+        )
+        if not review or not review.target_profile:
+            return
+
+        replier_id = reply.author_id
+        replier_name = reply.author.full_name if reply.author else "Someone"
+        parent_comment = reply.parent_comment
+        profile_name = (
+            review.target_profile.organization.name
+            if review.target_profile.organization
+            else "a profile"
+        )
+
+        notifications_to_add = []
+
+        # 1. Notify the original comment's author (unless they replied to themselves)
+        if parent_comment and parent_comment.author_id and parent_comment.author_id != replier_id:
+            if await notification_pref_repo.is_enabled(
+                db, parent_comment.author_id, "in_app", "comment_reply"
+            ):
+                notifications_to_add.append(Notification(
+                    user_id=parent_comment.author_id,
+                    notification_type="comment_reply",
+                    title="Someone replied to your comment",
+                    body=f"{replier_name} replied to your comment on a review for {profile_name}.",
+                    extra_data={"review_id": str(review.id), "reply_id": reply_id},
+                ))
+
+        # 2. Notify org admins of the profile (unless the replier is one of them)
+        org_id = review.target_profile.organization_id
+        if org_id:
+            admins = (
+                await db.execute(
+                    select(OrganizationMembership.user_id)
+                    .where(
+                        OrganizationMembership.organization_id == org_id,
+                        OrganizationMembership.role.in_(("owner", "admin")),
+                    )
+                )
+            ).scalars().all()
+
+            for admin_id in admins:
+                if admin_id == replier_id:
+                    continue
+                # Don't double-notify if this admin was also the comment author
+                if parent_comment and admin_id == parent_comment.author_id:
+                    continue
+                if await notification_pref_repo.is_enabled(db, admin_id, "in_app", "comment_reply"):
+                    notifications_to_add.append(Notification(
+                        user_id=admin_id,
+                        notification_type="comment_reply",
+                        title="New reply on your profile review",
+                        body=f"{replier_name} replied to a comment on a review for {profile_name}.",
+                        extra_data={"review_id": str(review.id), "reply_id": reply_id},
+                    ))
+
+        for n in notifications_to_add:
+            db.add(n)
+        await db.commit()
