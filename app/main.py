@@ -20,6 +20,7 @@ from app.routers import (
     admin,
     admin_auth,
     auth,
+    bookmarks,
     claim,
     disputes,
     notifications,
@@ -81,6 +82,7 @@ app.include_router(claim.router)
 app.include_router(admin_auth.router)
 app.include_router(admin.router)
 app.include_router(notifications.router)
+app.include_router(bookmarks.router)
 app.include_router(og.router)
 
 
