@@ -30,6 +30,8 @@ class Notification(Base):
             "score_updated",
             "badge_earned",
             "comment_reply",
+            "new_comment",
+            "review_liked",
             name="notification_type",
         ),
         nullable=False,

@@ -200,6 +200,7 @@ def build_review_item(review, current_user_id: str | None = None) -> dict:
         "reviewer": {
             "org_name": reviewer_org.name if reviewer_org else None,
             "org_type": reviewer_org.org_type if reviewer_org else None,
+            "handle": reviewer_org.profile.handle if reviewer_org and reviewer_org.profile else None,
             "avatar_url": None,
             "social": social or None,
         } if review.reviewer else None,

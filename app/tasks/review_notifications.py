@@ -483,3 +483,144 @@ async def _notify_comment_reply(reply_id: str) -> None:
         for n in notifications_to_add:
             db.add(n)
         await db.commit()
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# New comment notifications
+# ──────────────────────────────────────────────────────────────────────────────
+
+@celery_app.task(
+    name="app.tasks.review_notifications.notify_new_comment",
+    autoretry_for=(Exception,),
+    max_retries=3,
+    default_retry_delay=30,
+)
+def notify_new_comment(comment_id: str) -> None:
+    asyncio.run(_notify_new_comment(comment_id))
+
+
+async def _notify_new_comment(comment_id: str) -> None:
+    async with task_db_session() as db:
+        comment = await db.scalar(
+            select(ReviewComment)
+            .where(ReviewComment.id == uuid.UUID(comment_id))
+            .options(selectinload(ReviewComment.author))
+        )
+        if not comment or comment.parent_comment_id is not None:
+            return
+
+        review = await db.scalar(
+            select(Review)
+            .where(Review.id == comment.review_id)
+            .options(
+                selectinload(Review.reviewer),
+                selectinload(Review.target_profile).selectinload(Profile.organization),
+            )
+        )
+        if not review or not review.target_profile:
+            return
+
+        commenter_id = comment.author_id
+        commenter_name = comment.author.full_name if comment.author else "Someone"
+        profile_name = (
+            review.target_profile.organization.name
+            if review.target_profile.organization
+            else "a profile"
+        )
+
+        notifications_to_add = []
+
+        # 1. Notify the reviewer (unless they commented on their own review)
+        if review.reviewer_id and review.reviewer_id != commenter_id:
+            if await notification_pref_repo.is_enabled(
+                db, review.reviewer_id, "in_app", "new_comment"
+            ):
+                notifications_to_add.append(Notification(
+                    user_id=review.reviewer_id,
+                    notification_type="new_comment",
+                    title="Someone commented on your review",
+                    body=f"{commenter_name} commented on your review for {profile_name}.",
+                    extra_data={"review_id": str(review.id), "comment_id": comment_id},
+                ))
+
+        # 2. Notify org admins of the reviewed profile (unless they're the commenter)
+        org_id = review.target_profile.organization_id
+        if org_id:
+            admins = (
+                await db.execute(
+                    select(OrganizationMembership.user_id)
+                    .where(
+                        OrganizationMembership.organization_id == org_id,
+                        OrganizationMembership.role.in_(("owner", "admin")),
+                    )
+                )
+            ).scalars().all()
+
+            for admin_id in admins:
+                if admin_id == commenter_id:
+                    continue
+                # Don't double-notify if this admin is also the reviewer
+                if admin_id == review.reviewer_id:
+                    continue
+                if await notification_pref_repo.is_enabled(db, admin_id, "in_app", "new_comment"):
+                    notifications_to_add.append(Notification(
+                        user_id=admin_id,
+                        notification_type="new_comment",
+                        title="New comment on your profile review",
+                        body=f"{commenter_name} commented on a review for {profile_name}.",
+                        extra_data={"review_id": str(review.id), "comment_id": comment_id},
+                    ))
+
+        for n in notifications_to_add:
+            db.add(n)
+        await db.commit()
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Review liked notifications
+# ──────────────────────────────────────────────────────────────────────────────
+
+@celery_app.task(
+    name="app.tasks.review_notifications.notify_review_liked",
+    autoretry_for=(Exception,),
+    max_retries=3,
+    default_retry_delay=30,
+)
+def notify_review_liked(review_id: str, liker_user_id: str) -> None:
+    asyncio.run(_notify_review_liked(review_id, liker_user_id))
+
+
+async def _notify_review_liked(review_id: str, liker_user_id: str) -> None:
+    async with task_db_session() as db:
+        review = await db.scalar(
+            select(Review)
+            .where(Review.id == uuid.UUID(review_id))
+            .options(
+                selectinload(Review.reviewer),
+                selectinload(Review.target_profile).selectinload(Profile.organization),
+            )
+        )
+        if not review or not review.reviewer_id:
+            return
+
+        # Don't notify if the reviewer liked their own review
+        if review.reviewer_id == uuid.UUID(liker_user_id):
+            return
+
+        profile_name = (
+            review.target_profile.organization.name
+            if review.target_profile and review.target_profile.organization
+            else "a profile"
+        )
+
+        if await notification_pref_repo.is_enabled(
+            db, review.reviewer_id, "in_app", "review_liked"
+        ):
+            db.add(Notification(
+                user_id=review.reviewer_id,
+                notification_type="review_liked",
+                title="Someone found your review helpful",
+                body=f"Your review for {profile_name} was marked as helpful.",
+                extra_data={"review_id": review_id},
+            ))
+            await db.commit()

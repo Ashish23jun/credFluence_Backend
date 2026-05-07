@@ -18,6 +18,8 @@ PREF_TYPES = (
     "score_updated",
     "badge_earned",
     "comment_reply",
+    "new_comment",
+    "review_liked",
 )
 
 

@@ -4,6 +4,7 @@ from sqlalchemy import Float, and_, case, cast, func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from app.models.organization import Organization
 from app.models.profile import Profile
 from app.models.review import Review, ReviewComment, ReviewRating
 from app.models.tag_aggregation import TagAggregation
@@ -243,7 +244,7 @@ async def get_reviews_page(
     result = await db.execute(
         select(Review)
         .options(
-            selectinload(Review.reviewer).selectinload(User.organization),
+            selectinload(Review.reviewer).selectinload(User.organization).selectinload(Organization.profile),
             selectinload(Review.reviewer).selectinload(User.social_accounts),
             selectinload(Review.ratings),
             selectinload(Review.payments),

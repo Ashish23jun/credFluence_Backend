@@ -35,6 +35,8 @@ from app.services.profile_service import _reviewer_primary_social
 from app.services.storage_service import presign_put
 from app.tasks.review_notifications import (
     notify_comment_reply,
+    notify_new_comment,
+    notify_review_liked,
     notify_review_submitted,
     notify_review_verified,
     send_email_task,
@@ -475,6 +477,8 @@ async def toggle_review_like(
         liked = True
 
     await db.commit()
+    if liked:
+        notify_review_liked.delay(review_id, current_user["id"])
     return {"success": True, "message": "OK", "data": {"liked": liked}}
 
 
@@ -505,8 +509,10 @@ async def get_review_comments(
         .where(ReviewComment.review_id == rid, ReviewComment.parent_comment_id.is_(None), ReviewComment.status == "active")
         .options(
             selectinload(ReviewComment.author).selectinload(User.social_accounts),
+            selectinload(ReviewComment.author).selectinload(User.organization).selectinload(Organization.profile),
             selectinload(ReviewComment.likes),
             selectinload(ReviewComment.replies).selectinload(ReviewComment.author).selectinload(User.social_accounts),
+            selectinload(ReviewComment.replies).selectinload(ReviewComment.author).selectinload(User.organization).selectinload(Organization.profile),
             selectinload(ReviewComment.replies).selectinload(ReviewComment.likes),
         )
         .order_by(ReviewComment.created_at.asc())
@@ -514,17 +520,28 @@ async def get_review_comments(
     )
     comments = result.scalars().all()
 
-    def _ser_comment(c: ReviewComment, current_uid) -> dict:
+    def _ser_comment(c: ReviewComment, current_uid, depth: int = 0) -> dict:
         author = None
         if c.author:
             social = _reviewer_primary_social(
                 getattr(c.author, "social_accounts", None) or []
             )
+            profile = getattr(getattr(c.author, "organization", None), "profile", None)
+            if profile and profile.profile_type == "creator":
+                display_name = profile.handle or c.author.full_name or c.author.email
+            elif profile and profile.display_name:
+                display_name = profile.display_name
+            else:
+                display_name = c.author.full_name or c.author.email
             author = {
                 "id": str(c.author.id),
-                "name": c.author.full_name or c.author.email,
+                "name": display_name,
+                "handle": profile.handle if profile else None,
                 "social": social or None,
             }
+        replies: list = []
+        if depth == 0:
+            replies = [_ser_comment(r, current_uid, depth=1) for r in (c.replies or []) if r.status == "active"]
         return {
             "id": str(c.id),
             "body": c.body,
@@ -532,7 +549,7 @@ async def get_review_comments(
             "liked_by_me": any(lk.user_id == current_uid for lk in c.likes) if current_uid else False,
             "created_at": c.created_at.isoformat(),
             "author": author,
-            "replies": [_ser_comment(r, current_uid) for r in (c.replies or []) if r.status == "active"],
+            "replies": replies,
         }
 
     return {"success": True, "message": "OK", "data": {
@@ -569,6 +586,7 @@ async def add_review_comment(
     await db.commit()
     await db.refresh(comment)
 
+    notify_new_comment.delay(str(comment.id))
     return {"success": True, "message": "Comment added.", "data": {"id": str(comment.id)}}
 
 
