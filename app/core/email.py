@@ -213,7 +213,7 @@ def _review_detail_html(snapshot: dict) -> str:
 
 async def send_review_received_email(to_email: str, reviewer_name: str, review_id: str, snapshot: dict) -> None:
     """Sent to all org admins when a review is submitted for their org."""
-    url = f"{settings.frontend_url}/reviews/{review_id}/dispute"
+    url = f"{settings.frontend_url}/notifications?review_id={review_id}"
     subject = f"New review from {reviewer_name} — CredFluence"
     detail = _review_detail_html(snapshot)
     html = _wrap(
@@ -273,7 +273,7 @@ async def send_platform_admin_alert_email(to_email: str, target_name: str, conta
 
 async def send_review_live_email(to_email: str, target_name: str, review_id: str, role: str) -> None:
     """Sent to target org admins + reviewer when the 48hr window expires and review goes live."""
-    url = f"{settings.frontend_url}/reviews/{review_id}"
+    url = f"{settings.frontend_url}/notifications?review_id={review_id}"
     if role == "target":
         intro = "The 48-hour dispute window has closed. The review is now publicly visible on your profile."
     else:
@@ -290,7 +290,7 @@ async def send_review_live_email(to_email: str, target_name: str, review_id: str
 
 async def send_dispute_filed_email(to_email: str, case_id: str, review_id: str, role: str) -> None:
     """Sent to both reviewer and target when a dispute is filed."""
-    url = f"{settings.frontend_url}/disputes/{review_id}"
+    url = f"{settings.frontend_url}/notifications?review_id={review_id}"
     if role == "reviewer":
         title = "A dispute has been filed on your review"
         intro = f"The target organisation has disputed the review you submitted. Case ID <strong style='color:#E8FF5B;'>{case_id}</strong>."
@@ -344,7 +344,7 @@ async def send_account_deletion_email(to_email: str, days_remaining: int = 30) -
 
 async def send_dispute_resolved_email(to_email: str, case_id: str, outcome: str) -> None:
     """Sent to both reviewer and target when admin resolves a dispute."""
-    url = f"{settings.frontend_url}/disputes/{case_id}"
+    url = f"{settings.frontend_url}/notifications"
     outcome_msg = {
         "reviewer_won": "The platform admin sided with the reviewer. The review will go live publicly.",
         "target_won": "The platform admin sided with the target. The review has been hidden.",

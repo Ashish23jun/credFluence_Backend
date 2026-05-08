@@ -29,6 +29,7 @@ from app.models.review import (
     ReviewTag,
 )
 from app.models.user import User
+from app.repositories import notification_pref_repo
 from app.repositories.profile_repo import get_my_reviews_cursor, get_profile_by_handle
 from app.schemas.reviews import (
     CommentIn,
@@ -423,27 +424,53 @@ async def dispute_review(
         .values(extra_data=Notification.extra_data.op("||")({"review_status": "disputed"}))
     )
 
-    await db.commit()
-
     case_id = str(dispute.id)[:8].upper()
 
     reviewer = (await db.execute(
         select(User).where(User.id == review.reviewer_id)
     )).scalar_one_or_none()
 
+    reviewer_notif_id = None
+    if reviewer and await notification_pref_repo.is_enabled(db, reviewer.id, "in_app", "dispute_filed"):
+        reviewer_notif = Notification(
+            user_id=reviewer.id,
+            notification_type="dispute_filed",
+            title="A dispute has been filed on your review",
+            body=f"The recipient has disputed your review. Case ID {case_id}.",
+            extra_data={"review_id": str(review.id), "case_id": case_id, "role": "reviewer"},
+        )
+        db.add(reviewer_notif)
+        await db.flush()
+        reviewer_notif_id = str(reviewer_notif.id)
+
+    recipient_notif_id = None
+    if await notification_pref_repo.is_enabled(db, uuid.UUID(current_user["id"]), "in_app", "dispute_filed"):
+        recipient_notif = Notification(
+            user_id=uuid.UUID(current_user["id"]),
+            notification_type="dispute_filed",
+            title="Your dispute has been received",
+            body=f"We've received your dispute and platform admins will review it. Case ID {case_id}.",
+            extra_data={"review_id": str(review.id), "case_id": case_id, "role": "target"},
+        )
+        db.add(recipient_notif)
+        await db.flush()
+        recipient_notif_id = str(recipient_notif.id)
+
+    await db.commit()
+
     if reviewer:
         send_email_task.delay(
             "dispute_filed",
             reviewer.email,
             {"case_id": case_id, "review_id": str(review.id), "role": "reviewer"},
-            None,
+            reviewer_notif_id,
             str(reviewer.id),
         )
     send_email_task.delay(
         "dispute_filed",
         current_user["email"],
         {"case_id": case_id, "review_id": str(review.id), "role": "target"},
-        None,
+        recipient_notif_id,
         current_user["id"],
     )
 

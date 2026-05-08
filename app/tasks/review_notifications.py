@@ -262,6 +262,16 @@ async def _handle_on_platform(
     admins = rows.scalars().all()
 
     if not admins:
+        org = target_profile.organization
+        if org and org.is_personal_creator_org:
+            # Personal creator org: the sole owner is the user whose organization_id matches.
+            # Membership rows are the canonical path but fall back to user lookup if missing.
+            fallback = await db.execute(
+                select(User).where(User.organization_id == target_profile.organization_id)
+            )
+            admins = fallback.scalars().all()
+
+    if not admins:
         logger.info("review %s: target org has no approved admins, skipping", review.id)
         return
 

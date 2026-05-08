@@ -220,13 +220,13 @@ def _serialise_dispute(dispute: Dispute) -> dict:
 
 @router.get("/reviews")
 async def list_admin_reviews(
-    status: str = Query(default="in_dispute_window"),
+    status: str = Query(default="disputed"),
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=20, ge=1, le=100),
     current_admin: dict = Depends(get_current_platform_admin),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
-    _allowed = {"in_dispute_window", "disputed", "pending_verification", "verified", "rejected", "quarantined"}
+    _allowed = {"disputed", "pending_verification", "verified", "rejected", "quarantined"}
     if status not in _allowed:
         raise HTTPException(status_code=400, detail=f"status must be one of: {', '.join(sorted(_allowed))}")
 
