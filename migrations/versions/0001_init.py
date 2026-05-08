@@ -18,67 +18,14 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
-    # --- ENUMs ---
-    op.execute("CREATE TYPE user_role AS ENUM ('creator', 'agency', 'brand')")
-    op.execute("CREATE TYPE subscription_tier AS ENUM ('free', 'premium')")
-    op.execute("CREATE TYPE org_type AS ENUM ('creator', 'agency', 'brand')")
-    op.execute("CREATE TYPE org_verification_status AS ENUM ('pending', 'verified', 'rejected')")
-    op.execute("CREATE TYPE profile_type AS ENUM ('creator', 'agency', 'brand')")
-    op.execute("CREATE TYPE access_level AS ENUM ('full', 'limited')")
-    op.execute("CREATE TYPE social_platform AS ENUM ('youtube', 'instagram', 'linkedin')")
-    op.execute("CREATE TYPE membership_role AS ENUM ('admin', 'member')")
-    op.execute("CREATE TYPE membership_status AS ENUM ('pending', 'active', 'rejected')")
-    op.execute(
-        "CREATE TYPE relationship_type AS ENUM ("
-        "'brand_worked_with_creator','brand_worked_with_agency',"
-        "'agency_worked_with_creator','agency_worked_with_brand',"
-        "'agency_worked_with_agency','creator_worked_with_brand',"
-        "'creator_worked_with_agency','creator_worked_with_creator')"
-    )
-    op.execute(
-        "CREATE TYPE review_status AS ENUM ("
-        "'pending','in_dispute_window','disputed','pending_verification',"
-        "'verified','rejected','quarantined')"
-    )
-    op.execute(
-        "CREATE TYPE dispute_type AS ENUM ("
-        "'verification','duplicate_name','false_claim','recipient_dispute')"
-    )
-    op.execute(
-        "CREATE TYPE dispute_status AS ENUM ("
-        "'open','investigating','resolved_in_favor','resolved_rejected')"
-    )
-    op.execute(
-        "CREATE TYPE dispute_recipient_type AS ENUM ('platform_admin', 'org_admin')"
-    )
-    op.execute(
-        "CREATE TYPE notification_type AS ENUM ("
-        "'review_received','dispute_window_expiring','dispute_filed','dispute_resolved',"
-        "'review_verified','review_rejected','profile_claimed','score_updated',"
-        "'badge_earned','comment_reply','new_comment','review_liked','member_request')"
-    )
-    op.execute("CREATE TYPE notif_pref_channel AS ENUM ('email', 'in_app')")
-    op.execute(
-        "CREATE TYPE notif_pref_type AS ENUM ("
-        "'review_received','dispute_filed','dispute_resolved','review_verified',"
-        "'review_rejected','profile_claimed','score_updated','badge_earned',"
-        "'comment_reply','new_comment','review_liked','member_request')"
-    )
-    op.execute(
-        "CREATE TYPE fraud_severity AS ENUM ('low', 'medium', 'high', 'critical')"
-    )
-    op.execute(
-        "CREATE TYPE fraud_alert_status AS ENUM ('open', 'investigating', 'resolved', 'false_positive')"
-    )
-
     # --- organizations ---
     op.create_table(
         "organizations",
         sa.Column("id", postgresql.UUID(as_uuid=True), nullable=False),
         sa.Column("name", sa.String(255), nullable=False),
         sa.Column("slug", sa.String(100), nullable=False),
-        sa.Column("org_type", sa.Enum("creator", "agency", "brand", name="org_type", create_type=False), nullable=False),
-        sa.Column("verification_status", sa.Enum("pending", "verified", "rejected", name="org_verification_status", create_type=False), nullable=False, server_default="pending"),
+        sa.Column("org_type", sa.Enum("creator", "agency", "brand", name="org_type"), nullable=False),
+        sa.Column("verification_status", sa.Enum("pending", "verified", "rejected", name="org_verification_status"), nullable=False, server_default="pending"),
         sa.Column("verification_notes", sa.Text, nullable=True),
         sa.Column("rejected_reason", sa.Text, nullable=True),
         sa.Column("verified_at", sa.DateTime(timezone=True), nullable=True),
@@ -129,14 +76,14 @@ def upgrade() -> None:
         "fraud_alerts",
         sa.Column("id", postgresql.UUID(as_uuid=True), nullable=False),
         sa.Column("rule_name", sa.String(100), nullable=False),
-        sa.Column("severity", sa.Enum("low", "medium", "high", "critical", name="fraud_severity", create_type=False), nullable=False),
+        sa.Column("severity", sa.Enum("low", "medium", "high", "critical", name="fraud_severity"), nullable=False),
         sa.Column("target_user_id", postgresql.UUID(as_uuid=True), nullable=True),
         sa.Column("target_profile_id", postgresql.UUID(as_uuid=True), nullable=True),
         sa.Column("ip_address", sa.String(45), nullable=True),
         sa.Column("evidence", postgresql.JSONB, nullable=True),
         sa.Column("description", sa.Text, nullable=True),
         sa.Column("auto_actions_taken", postgresql.JSONB, nullable=True),
-        sa.Column("status", sa.Enum("open", "investigating", "resolved", "false_positive", name="fraud_alert_status", create_type=False), nullable=False, server_default="open"),
+        sa.Column("status", sa.Enum("open", "investigating", "resolved", "false_positive", name="fraud_alert_status"), nullable=False, server_default="open"),
         sa.Column("resolved_by_admin_id", postgresql.UUID(as_uuid=True), nullable=True),
         sa.Column("resolved_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.text("now()")),
@@ -155,7 +102,7 @@ def upgrade() -> None:
         sa.Column("email", sa.String(255), nullable=False),
         sa.Column("full_name", sa.String(255), nullable=True),
         sa.Column("hashed_password", sa.String(255), nullable=True),
-        sa.Column("role", sa.Enum("creator", "agency", "brand", name="user_role", create_type=False), nullable=False),
+        sa.Column("role", sa.Enum("creator", "agency", "brand", name="user_role"), nullable=False),
         sa.Column("is_active", sa.Boolean, nullable=False, server_default="true"),
         sa.Column("is_verified", sa.Boolean, nullable=False, server_default="false"),
         sa.Column("email_verified_at", sa.DateTime(timezone=True), nullable=True),
@@ -166,7 +113,7 @@ def upgrade() -> None:
         sa.Column("onboarding_completed_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("phone_encrypted", sa.Text, nullable=True),
         sa.Column("trust_weight", sa.Float, nullable=False, server_default="1.0"),
-        sa.Column("subscription_tier", sa.Enum("free", "premium", name="subscription_tier", create_type=False), nullable=False, server_default="free"),
+        sa.Column("subscription_tier", sa.Enum("free", "premium", name="subscription_tier"), nullable=False, server_default="free"),
         sa.Column("deleted_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.text("now()")),
         sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.text("now()")),
@@ -201,8 +148,8 @@ def upgrade() -> None:
         sa.Column("id", postgresql.UUID(as_uuid=True), nullable=False),
         sa.Column("organization_id", postgresql.UUID(as_uuid=True), nullable=False),
         sa.Column("user_id", postgresql.UUID(as_uuid=True), nullable=False),
-        sa.Column("role", sa.Enum("admin", "member", name="membership_role", create_type=False), nullable=False, server_default="member"),
-        sa.Column("status", sa.Enum("pending", "active", "rejected", name="membership_status", create_type=False), nullable=False, server_default="pending"),
+        sa.Column("role", sa.Enum("admin", "member", name="membership_role"), nullable=False, server_default="member"),
+        sa.Column("status", sa.Enum("pending", "active", "rejected", name="membership_status"), nullable=False, server_default="pending"),
         sa.Column("approved_by_user_id", postgresql.UUID(as_uuid=True), nullable=True),
         sa.Column("approved_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.text("now()")),
@@ -226,7 +173,7 @@ def upgrade() -> None:
         sa.Column("avatar_url", sa.Text, nullable=True),
         sa.Column("bio", sa.Text, nullable=True),
         sa.Column("location", sa.String(255), nullable=True),
-        sa.Column("profile_type", sa.Enum("creator", "agency", "brand", name="profile_type", create_type=False), nullable=False),
+        sa.Column("profile_type", sa.Enum("creator", "agency", "brand", name="profile_type"), nullable=False),
         sa.Column("category", sa.String(100), nullable=True),
         sa.Column("trust_score", sa.Integer, nullable=False, server_default="45"),
         sa.Column("review_count", sa.Integer, nullable=False, server_default="0"),
@@ -237,7 +184,7 @@ def upgrade() -> None:
         sa.Column("is_claimed", sa.Boolean, nullable=False, server_default="false"),
         sa.Column("is_dummy", sa.Boolean, nullable=False, server_default="false"),
         sa.Column("is_opted_out", sa.Boolean, nullable=False, server_default="false"),
-        sa.Column("access_level", sa.Enum("full", "limited", name="access_level", create_type=False), nullable=False, server_default="limited"),
+        sa.Column("access_level", sa.Enum("full", "limited", name="access_level"), nullable=False, server_default="limited"),
         sa.Column("search_vector", postgresql.TSVECTOR, nullable=True),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.text("now()")),
         sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.text("now()")),
@@ -252,7 +199,6 @@ def upgrade() -> None:
     op.create_index("ix_profiles_category", "profiles", ["category"])
     op.create_index("ix_profiles_search_vector", "profiles", ["search_vector"], postgresql_using="gin")
 
-    # tsvector trigger
     op.execute("""
         CREATE OR REPLACE FUNCTION profiles_search_vector_update() RETURNS trigger AS $$
         BEGIN
@@ -277,7 +223,7 @@ def upgrade() -> None:
         "social_accounts",
         sa.Column("id", postgresql.UUID(as_uuid=True), nullable=False),
         sa.Column("user_id", postgresql.UUID(as_uuid=True), nullable=False),
-        sa.Column("platform", sa.Enum("youtube", "instagram", "linkedin", name="social_platform", create_type=False), nullable=False),
+        sa.Column("platform", sa.Enum("youtube", "instagram", "linkedin", name="social_platform"), nullable=False),
         sa.Column("platform_account_id", sa.String(255), nullable=False),
         sa.Column("username", sa.String(255), nullable=True),
         sa.Column("display_name", sa.String(255), nullable=True),
@@ -307,14 +253,14 @@ def upgrade() -> None:
             "agency_worked_with_creator", "agency_worked_with_brand",
             "agency_worked_with_agency", "creator_worked_with_brand",
             "creator_worked_with_agency", "creator_worked_with_creator",
-            name="relationship_type", create_type=False,
+            name="relationship_type",
         ), nullable=False),
         sa.Column("total_deal_value", sa.Integer, nullable=True),
         sa.Column("currency", sa.String(3), nullable=False, server_default="INR"),
         sa.Column("status", sa.Enum(
             "pending", "in_dispute_window", "disputed", "pending_verification",
             "verified", "rejected", "quarantined",
-            name="review_status", create_type=False,
+            name="review_status",
         ), nullable=False, server_default="in_dispute_window"),
         sa.Column("contact_email", sa.String(254), nullable=True),
         sa.Column("contact_phone", sa.String(30), nullable=True),
@@ -502,10 +448,10 @@ def upgrade() -> None:
         sa.Column("id", postgresql.UUID(as_uuid=True), nullable=False),
         sa.Column("review_id", postgresql.UUID(as_uuid=True), nullable=False),
         sa.Column("filed_by_user_id", postgresql.UUID(as_uuid=True), nullable=False),
-        sa.Column("type", sa.Enum("verification", "duplicate_name", "false_claim", "recipient_dispute", name="dispute_type", create_type=False), nullable=False),
+        sa.Column("type", sa.Enum("verification", "duplicate_name", "false_claim", "recipient_dispute", name="dispute_type"), nullable=False),
         sa.Column("reason", sa.Text, nullable=False),
         sa.Column("counter_evidence_keys", postgresql.JSONB, nullable=True),
-        sa.Column("status", sa.Enum("open", "investigating", "resolved_in_favor", "resolved_rejected", name="dispute_status", create_type=False), nullable=False, server_default="open"),
+        sa.Column("status", sa.Enum("open", "investigating", "resolved_in_favor", "resolved_rejected", name="dispute_status"), nullable=False, server_default="open"),
         sa.Column("outcome", sa.String(30), nullable=True),
         sa.Column("resolved_by_admin_id", postgresql.UUID(as_uuid=True), nullable=True),
         sa.Column("resolution_notes", sa.Text, nullable=True),
@@ -531,7 +477,7 @@ def upgrade() -> None:
         "dispute_recipients",
         sa.Column("id", postgresql.UUID(as_uuid=True), nullable=False),
         sa.Column("dispute_id", postgresql.UUID(as_uuid=True), nullable=False),
-        sa.Column("recipient_type", sa.Enum("platform_admin", "org_admin", name="dispute_recipient_type", create_type=False), nullable=False),
+        sa.Column("recipient_type", sa.Enum("platform_admin", "org_admin", name="dispute_recipient_type"), nullable=False),
         sa.Column("recipient_org_id", postgresql.UUID(as_uuid=True), nullable=True),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.text("now()")),
         sa.ForeignKeyConstraint(["dispute_id"], ["disputes.id"], ondelete="CASCADE"),
@@ -549,7 +495,7 @@ def upgrade() -> None:
             "review_received", "dispute_window_expiring", "dispute_filed", "dispute_resolved",
             "review_verified", "review_rejected", "profile_claimed", "score_updated",
             "badge_earned", "comment_reply", "new_comment", "review_liked", "member_request",
-            name="notification_type", create_type=False,
+            name="notification_type",
         ), nullable=False),
         sa.Column("title", sa.String(255), nullable=False),
         sa.Column("body", sa.Text, nullable=False),
@@ -571,12 +517,12 @@ def upgrade() -> None:
         "notification_preferences",
         sa.Column("id", postgresql.UUID(as_uuid=True), nullable=False),
         sa.Column("user_id", postgresql.UUID(as_uuid=True), nullable=False),
-        sa.Column("channel", sa.Enum("email", "in_app", name="notif_pref_channel", create_type=False), nullable=False),
+        sa.Column("channel", sa.Enum("email", "in_app", name="notif_pref_channel"), nullable=False),
         sa.Column("type", sa.Enum(
             "review_received", "dispute_filed", "dispute_resolved", "review_verified",
             "review_rejected", "profile_claimed", "score_updated", "badge_earned",
             "comment_reply", "new_comment", "review_liked", "member_request",
-            name="notif_pref_type", create_type=False,
+            name="notif_pref_type",
         ), nullable=False),
         sa.Column("enabled", sa.Boolean, nullable=False, server_default="true"),
         sa.ForeignKeyConstraint(["user_id"], ["users.id"], ondelete="CASCADE"),

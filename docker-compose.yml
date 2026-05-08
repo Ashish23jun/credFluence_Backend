@@ -62,6 +62,9 @@ services:
       - INSTAGRAM_CLIENT_SECRET=${INSTAGRAM_CLIENT_SECRET}
       - INSTAGRAM_REDIRECT_URI=${INSTAGRAM_REDIRECT_URI}
 
+      # --- Frontend ---
+      - FRONTEND_URL=${FRONTEND_URL:-http://localhost:5173}
+
       # --- CORS ---
       - ALLOWED_ORIGINS=${ALLOWED_ORIGINS}
 
