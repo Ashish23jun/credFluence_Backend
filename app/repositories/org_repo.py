@@ -54,6 +54,22 @@ async def list_orgs_by_status(
     return result.scalars().all()
 
 
+async def get_org_admins(
+    db: AsyncSession, org_id
+) -> list[OrganizationMembership]:
+    """Active admin members of an org — used to fan out notifications."""
+    result = await db.execute(
+        select(OrganizationMembership)
+        .options(selectinload(OrganizationMembership.user))
+        .where(
+            OrganizationMembership.organization_id == org_id,
+            OrganizationMembership.role == "admin",
+            OrganizationMembership.status == "active",
+        )
+    )
+    return result.scalars().all()
+
+
 async def list_pending_memberships(
     db: AsyncSession, org_id
 ) -> list[OrganizationMembership]:

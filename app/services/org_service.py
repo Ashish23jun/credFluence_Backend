@@ -12,6 +12,7 @@ from datetime import UTC, datetime
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from app.models.organization import Organization
 from app.models.organization_domain import OrganizationDomain
@@ -137,6 +138,12 @@ async def _resolve_business_org(
             status="pending",
         )
         db.add(membership)
+
+        # Notify org admins after flush so user.id is available
+        await db.flush()
+        from app.tasks.review_notifications import notify_member_request
+        notify_member_request.delay(str(user.id), str(org.id))
+
         return org, membership
 
     # First user on this domain — create org.

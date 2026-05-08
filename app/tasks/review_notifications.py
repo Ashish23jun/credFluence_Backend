@@ -624,3 +624,48 @@ async def _notify_review_liked(review_id: str, liker_user_id: str) -> None:
                 extra_data={"review_id": review_id},
             ))
             await db.commit()
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# New member request notifications (org admins)
+# ──────────────────────────────────────────────────────────────────────────────
+
+@celery_app.task(
+    name="app.tasks.review_notifications.notify_member_request",
+    autoretry_for=(Exception,),
+    max_retries=3,
+    default_retry_delay=30,
+)
+def notify_member_request(new_user_id: str, org_id: str) -> None:
+    asyncio.run(_notify_member_request(new_user_id, org_id))
+
+
+async def _notify_member_request(new_user_id: str, org_id: str) -> None:
+    from app.repositories.org_repo import get_org_admins
+
+    async with task_db_session() as db:
+        new_user = await db.scalar(
+            select(User).where(User.id == uuid.UUID(new_user_id))
+        )
+        if not new_user:
+            return
+
+        admins = await get_org_admins(db, uuid.UUID(org_id))
+        notifications_to_add = []
+        for membership in admins:
+            if not membership.user_id or membership.user_id == new_user.id:
+                continue
+            if await notification_pref_repo.is_enabled(
+                db, membership.user_id, "in_app", "member_request"
+            ):
+                notifications_to_add.append(Notification(
+                    user_id=membership.user_id,
+                    notification_type="member_request",
+                    title="New member request",
+                    body=f"{new_user.email} wants to join your organization.",
+                    extra_data={"user_id": new_user_id},
+                ))
+
+        for n in notifications_to_add:
+            db.add(n)
+        await db.commit()
