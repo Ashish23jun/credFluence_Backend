@@ -4,7 +4,7 @@ import logging
 import uuid
 from datetime import UTC, datetime
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.orm import selectinload
 
 from app.core.cache import cache_set
@@ -80,6 +80,15 @@ async def _check_dispute_windows() -> None:
         for review in expired:
             review.status = "verified"
             review.verified_at = now
+
+            await db.execute(
+                update(Notification)
+                .where(
+                    Notification.notification_type == "review_received",
+                    Notification.extra_data["review_id"].astext == str(review.id),
+                )
+                .values(extra_data=Notification.extra_data.op("||")({"review_status": "verified"}))
+            )
 
             target_profile = review.target_profile
 

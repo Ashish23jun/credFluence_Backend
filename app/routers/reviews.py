@@ -5,7 +5,7 @@ import uuid
 from datetime import UTC, date, datetime, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import func, select, update
+from sqlalchemy import case, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -39,7 +39,7 @@ from app.schemas.reviews import (
     SubmitReviewRequest,
 )
 from app.services.profile_service import _reviewer_primary_social
-from app.services.storage_service import presign_put
+from app.services.storage_service import presign_get, presign_put
 from app.tasks.review_notifications import (
     notify_comment_reply,
     notify_new_comment,
@@ -827,3 +827,82 @@ async def my_reviews(
             "limit": limit,
         },
     }
+
+
+# GET /reviews/received  — reviews targeting the current user's org profile
+# ---------------------------------------------------------------------------
+
+@router.get("/received")
+async def received_reviews(
+    current_user: dict = Depends(require_onboarded),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    org_id = (current_user.get("org") or {}).get("id")
+    if not org_id:
+        raise HTTPException(status_code=403, detail="No organisation found")
+
+    result = await db.execute(
+        select(Review)
+        .join(Profile, Review.target_profile_id == Profile.id)
+        .where(
+            Profile.organization_id == uuid.UUID(org_id),
+            Review.status.in_(["in_dispute_window", "disputed", "verified", "rejected", "quarantined"]),
+        )
+        .options(
+            selectinload(Review.reviewer).selectinload(User.social_accounts),
+            selectinload(Review.reviewer).selectinload(User.organization).selectinload(Organization.profile),
+            selectinload(Review.ratings),
+            selectinload(Review.tags),
+            selectinload(Review.evidence),
+            selectinload(Review.flags),
+            selectinload(Review.payments),
+            selectinload(Review.dispute),
+        )
+        .order_by(Review.created_at.desc())
+    )
+    reviews = result.scalars().all()
+
+    items = []
+    for rev in reviews:
+        reviewer = rev.reviewer
+        social = _reviewer_primary_social(reviewer.social_accounts if reviewer else [])
+        scores = [r.score for r in rev.ratings] if rev.ratings else []
+        avg = round(sum(scores) / len(scores), 2) if scores else None
+        items.append({
+            "id": str(rev.id),
+            "status": rev.status,
+            "relationship_type": rev.relationship_type,
+            "body": rev.body,
+            "avg_rating": avg,
+            "ratings": [{"category": r.category, "score": r.score} for r in (rev.ratings or [])],
+            "tags": [t.tag for t in (rev.tags or [])],
+            "flags": [{"type": f.type, "severity": f.severity} for f in (rev.flags or [])],
+            "payments": [{"type": p.payment_type, "amount_rupees": (p.amount or 0) // 100, "status": p.status} for p in (rev.payments or [])],
+            "evidence": [
+                {
+                    "id": str(e.id),
+                    "type": e.type,
+                    "filename": e.file_key.rsplit("/", 1)[-1],
+                    "url": presign_get(e.file_key),
+                }
+                for e in (rev.evidence or [])
+            ],
+            "total_deal_value": rev.total_deal_value,
+            "dispute_window_expires_at": (
+                rev.dispute_window_expires_at.isoformat() if rev.dispute_window_expires_at else None
+            ),
+            "created_at": rev.created_at.isoformat(),
+            "reviewer": {
+                "name": reviewer.full_name if reviewer else None,
+                "handle": reviewer.organization.profile.handle if (reviewer and reviewer.organization and reviewer.organization.profile) else None,
+                "email": reviewer.email if reviewer else None,
+                "social": social,
+            } if reviewer else None,
+            "dispute": {
+                "status": rev.dispute.status,
+                "outcome": rev.dispute.outcome,
+                "resolution_notes": rev.dispute.resolution_notes,
+            } if rev.dispute else None,
+        })
+
+    return {"success": True, "message": "OK", "data": {"items": items}}
