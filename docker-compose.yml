@@ -6,31 +6,154 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+    container_name: credfluence-api
     ports:
       - "8000:8000"
-    env_file:
-      - .env
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-      elasticsearch:
-        condition: service_healthy
+    environment:
+      # --- App ---
+      - APP_ENV=${APP_ENV:-development}
+      - APP_SECRET_KEY=${APP_SECRET_KEY}
+      - DEBUG=${DEBUG:-false}
+
+      # --- Database ---
+      - DATABASE_URL=${DATABASE_URL}
+      - DATABASE_URL_SYNC=${DATABASE_URL_SYNC}
+
+      # --- Redis ---
+      - REDIS_URL=${REDIS_URL}
+
+      # --- JWT ---
+      - JWT_PRIVATE_KEY_PATH=${JWT_PRIVATE_KEY_PATH:-./private.pem}
+      - JWT_PUBLIC_KEY_PATH=${JWT_PUBLIC_KEY_PATH:-./public.pem}
+      - JWT_ALGORITHM=${JWT_ALGORITHM:-RS256}
+      - JWT_ACCESS_TOKEN_EXPIRE_MINUTES=${JWT_ACCESS_TOKEN_EXPIRE_MINUTES:-30}
+      - JWT_REFRESH_TOKEN_EXPIRE_DAYS=${JWT_REFRESH_TOKEN_EXPIRE_DAYS:-7}
+
+      # --- Phone Encryption ---
+      - PHONE_ENCRYPTION_KEY=${PHONE_ENCRYPTION_KEY}
+
+      # --- Storage (AWS S3) ---
+      - S3_ACCESS_KEY=${S3_ACCESS_KEY}
+      - S3_SECRET_KEY=${S3_SECRET_KEY}
+      - S3_BUCKET_NAME=${S3_BUCKET_NAME}
+      - S3_REGION=${S3_REGION:-ap-south-1}
+
+      # --- Email ---
+      - EMAIL_FROM=${EMAIL_FROM}
+      - EMAIL_FROM_NAME=${EMAIL_FROM_NAME}
+      - SMTP_HOST=${SMTP_HOST:-smtp.resend.com}
+      - SMTP_PORT=${SMTP_PORT:-465}
+      - SMTP_TLS=${SMTP_TLS:-true}
+      - SMTP_USER=${SMTP_USER:-resend}
+      - SMTP_PASSWORD=${SMTP_PASSWORD}
+
+      # --- OAuth Google ---
+      - GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID}
+      - GOOGLE_CLIENT_SECRET=${GOOGLE_CLIENT_SECRET}
+      - GOOGLE_REDIRECT_URI=${GOOGLE_REDIRECT_URI}
+
+      # --- OAuth LinkedIn ---
+      - LINKEDIN_CLIENT_ID=${LINKEDIN_CLIENT_ID}
+      - LINKEDIN_CLIENT_SECRET=${LINKEDIN_CLIENT_SECRET}
+      - LINKEDIN_REDIRECT_URI=${LINKEDIN_REDIRECT_URI}
+
+      # --- OAuth Instagram ---
+      - INSTAGRAM_CLIENT_ID=${INSTAGRAM_CLIENT_ID}
+      - INSTAGRAM_CLIENT_SECRET=${INSTAGRAM_CLIENT_SECRET}
+      - INSTAGRAM_REDIRECT_URI=${INSTAGRAM_REDIRECT_URI}
+
+      # --- CORS ---
+      - ALLOWED_ORIGINS=${ALLOWED_ORIGINS}
+
+      # --- Rate Limiting ---
+      - RATE_LIMIT_REQUESTS_PER_MINUTE=${RATE_LIMIT_REQUESTS_PER_MINUTE:-60}
+      - RATE_LIMIT_REVIEWS_PER_WEEK=${RATE_LIMIT_REVIEWS_PER_WEEK:-5}
+
+      # --- Elasticsearch ---
+      - ES_HOST=${ES_HOST:-http://elasticsearch:9200}
+
+      # --- Sentry ---
+      - SENTRY_DSN=${SENTRY_DSN:-}
+
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
     volumes:
       - ./app:/app/app
       - ./migrations:/app/migrations
       - ./scripts:/app/scripts
-    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    restart: unless-stopped
     networks:
       - credfluence
-    restart: unless-stopped
+      - dokploy-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      start_period: 20s
+      retries: 3
 
   # ──────────────────────────────────────────────
-  # PostgreSQL
+  # Celery Worker
+  # ──────────────────────────────────────────────
+  celery_worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: credfluence-worker
+    environment:
+      - APP_ENV=${APP_ENV:-development}
+      - APP_SECRET_KEY=${APP_SECRET_KEY}
+      - DATABASE_URL=${DATABASE_URL}
+      - DATABASE_URL_SYNC=${DATABASE_URL_SYNC}
+      - REDIS_URL=${REDIS_URL}
+      - S3_ACCESS_KEY=${S3_ACCESS_KEY}
+      - S3_SECRET_KEY=${S3_SECRET_KEY}
+      - S3_BUCKET_NAME=${S3_BUCKET_NAME}
+      - S3_REGION=${S3_REGION:-ap-south-1}
+      - EMAIL_FROM=${EMAIL_FROM}
+      - EMAIL_FROM_NAME=${EMAIL_FROM_NAME}
+      - SMTP_HOST=${SMTP_HOST:-smtp.resend.com}
+      - SMTP_PORT=${SMTP_PORT:-465}
+      - SMTP_TLS=${SMTP_TLS:-true}
+      - SMTP_USER=${SMTP_USER:-resend}
+      - SMTP_PASSWORD=${SMTP_PASSWORD}
+      - ES_HOST=${ES_HOST:-http://elasticsearch:9200}
+      - PHONE_ENCRYPTION_KEY=${PHONE_ENCRYPTION_KEY}
+    volumes:
+      - ./app:/app/app
+    command: celery -A app.tasks.celery_app worker --loglevel=info --concurrency=2
+    restart: unless-stopped
+    networks:
+      - credfluence
+      - dokploy-network
+
+  # ──────────────────────────────────────────────
+  # Celery Beat
+  # ──────────────────────────────────────────────
+  celery_beat:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: credfluence-beat
+    environment:
+      - APP_ENV=${APP_ENV:-development}
+      - APP_SECRET_KEY=${APP_SECRET_KEY}
+      - DATABASE_URL=${DATABASE_URL}
+      - DATABASE_URL_SYNC=${DATABASE_URL_SYNC}
+      - REDIS_URL=${REDIS_URL}
+      - ES_HOST=${ES_HOST:-http://elasticsearch:9200}
+      - PHONE_ENCRYPTION_KEY=${PHONE_ENCRYPTION_KEY}
+    command: celery -A app.tasks.celery_app beat --loglevel=info
+    restart: unless-stopped
+    networks:
+      - credfluence
+      - dokploy-network
+
+  # ──────────────────────────────────────────────
+  # PostgreSQL (local only)
   # ──────────────────────────────────────────────
   postgres:
     image: postgres:16-alpine
+    profiles: ["local"]
     environment:
       POSTGRES_USER: credfluence
       POSTGRES_PASSWORD: credfluence
@@ -59,10 +182,11 @@ services:
     restart: unless-stopped
 
   # ──────────────────────────────────────────────
-  # Redis
+  # Redis (local only)
   # ──────────────────────────────────────────────
   redis:
     image: redis:7-alpine
+    profiles: ["local"]
     volumes:
       - redis_data:/data
     command: redis-server --appendonly yes
@@ -76,33 +200,11 @@ services:
     restart: unless-stopped
 
   # ──────────────────────────────────────────────
-  # Celery Worker
-  # ──────────────────────────────────────────────
-  celery_worker:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    env_file:
-      - .env
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-      elasticsearch:
-        condition: service_healthy
-    volumes:
-      - ./app:/app/app
-    command: celery -A app.tasks.celery_app worker --loglevel=info --concurrency=2
-    networks:
-      - credfluence
-    restart: unless-stopped
-
-  # ──────────────────────────────────────────────
-  # Elasticsearch
+  # Elasticsearch (local only)
   # ──────────────────────────────────────────────
   elasticsearch:
-    image: elasticsearch:8.13.4
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.13.4
+    profiles: ["local"]
     environment:
       - discovery.type=single-node
       - xpack.security.enabled=false
@@ -120,27 +222,6 @@ services:
       - credfluence
     restart: unless-stopped
 
-  # ──────────────────────────────────────────────
-  # Celery Beat (scheduler)
-  # ──────────────────────────────────────────────
-  celery_beat:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    env_file:
-      - .env
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-    volumes:
-      - ./app:/app/app
-    command: celery -A app.tasks.celery_app beat --loglevel=info
-    networks:
-      - credfluence
-    restart: unless-stopped
-
 volumes:
   postgres_data:
   redis_data:
@@ -149,3 +230,5 @@ volumes:
 networks:
   credfluence:
     driver: bridge
+  dokploy-network:
+    external: true
